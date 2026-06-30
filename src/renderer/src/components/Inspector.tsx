@@ -11,7 +11,9 @@ import {
   FolderOpen,
   Files,
   Eye,
-  RefreshCw
+  RefreshCw,
+  PanelBottom,
+  PanelRight
 } from 'lucide-react'
 import { useStore } from '../store/store'
 import { MarkdownView } from './MarkdownView'
@@ -19,15 +21,19 @@ import { CodeView } from './CodeView'
 import { SpreadsheetView } from './SpreadsheetView'
 import type { FileNode } from '@shared/types'
 
-export function Inspector(): JSX.Element {
+export function Inspector({ dock }: { dock: 'right' | 'bottom' }): JSX.Element {
+  const isBottom = dock === 'bottom'
   return (
     <div className="pane">
-      <PanelGroup direction="vertical" autoSaveId="heph-inspector">
-        <Panel defaultSize={42} minSize={15}>
+      <PanelGroup
+        direction={isBottom ? 'horizontal' : 'vertical'}
+        autoSaveId={isBottom ? 'heph-inspector-h' : 'heph-inspector'}
+      >
+        <Panel defaultSize={isBottom ? 30 : 42} minSize={15}>
           <FileBrowser />
         </Panel>
         <PanelResizeHandle className="rrp-handle" />
-        <Panel defaultSize={58} minSize={20}>
+        <Panel defaultSize={isBottom ? 70 : 58} minSize={20}>
           <Preview />
         </Panel>
       </PanelGroup>
@@ -39,6 +45,8 @@ function FileBrowser(): JSX.Element {
   const fileTree = useStore((s) => s.fileTree)
   const selectedCwd = useStore((s) => s.selectedCwd)
   const refreshFiles = useStore((s) => s.refreshFiles)
+  const inspectorDock = useStore((s) => s.inspectorDock)
+  const toggleInspectorDock = useStore((s) => s.toggleInspectorDock)
 
   return (
     <div className="pane">
@@ -55,8 +63,16 @@ function FileBrowser(): JSX.Element {
           </span>
         )}
         <button
-          className="icon-btn"
+          className="icon-btn dock-toggle"
           style={{ marginLeft: selectedCwd ? 6 : 'auto', width: 24, height: 24 }}
+          title={inspectorDock === 'right' ? 'Dock panel to bottom' : 'Dock panel to right'}
+          onClick={toggleInspectorDock}
+        >
+          {inspectorDock === 'right' ? <PanelBottom size={13} /> : <PanelRight size={13} />}
+        </button>
+        <button
+          className="icon-btn"
+          style={{ width: 24, height: 24 }}
           title="Refresh files"
           disabled={!selectedCwd}
           onClick={() => void refreshFiles()}

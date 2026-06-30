@@ -15,6 +15,7 @@ export function App(): JSX.Element {
   const view = useStore((s) => s.view)
   const zen = useStore((s) => s.zen)
   const addModalOpen = useStore((s) => s.addModalOpen)
+  const inspectorDock = useStore((s) => s.inspectorDock)
 
   useEffect(() => {
     void init()
@@ -26,7 +27,31 @@ export function App(): JSX.Element {
       <div className="workspace">
         {view === 'dashboard' ? (
           <Dashboard />
+        ) : inspectorDock === 'bottom' ? (
+          /* ── Bottom dock: vertical split → top row (Projects + Forge) | bottom (Inspector) ── */
+          <PanelGroup direction="vertical" autoSaveId="heph-rows">
+            <Panel defaultSize={65} minSize={25} order={1}>
+              <PanelGroup direction="horizontal" autoSaveId="heph-cols-top">
+                {!zen && (
+                  <>
+                    <Panel defaultSize={20} minSize={12} order={1}>
+                      <Projects />
+                    </Panel>
+                    <PanelResizeHandle className="rrp-handle" />
+                  </>
+                )}
+                <Panel defaultSize={80} minSize={30} order={2}>
+                  <Forge />
+                </Panel>
+              </PanelGroup>
+            </Panel>
+            <PanelResizeHandle className="rrp-handle" />
+            <Panel defaultSize={35} minSize={12} order={2}>
+              <Inspector dock="bottom" />
+            </Panel>
+          </PanelGroup>
         ) : (
+          /* ── Right dock (default): single horizontal split ── */
           <PanelGroup direction="horizontal" autoSaveId="heph-cols">
             {!zen && (
               <>
@@ -36,12 +61,12 @@ export function App(): JSX.Element {
                 <PanelResizeHandle className="rrp-handle" />
               </>
             )}
-            <Panel defaultSize={zen ? 50 : 50} minSize={25} order={2}>
+            <Panel defaultSize={50} minSize={25} order={2}>
               <Forge />
             </Panel>
             <PanelResizeHandle className="rrp-handle" />
             <Panel defaultSize={30} minSize={18} order={3}>
-              <Inspector />
+              <Inspector dock="right" />
             </Panel>
           </PanelGroup>
         )}
@@ -52,3 +77,4 @@ export function App(): JSX.Element {
     </div>
   )
 }
+

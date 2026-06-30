@@ -734,7 +734,16 @@ button:focus-visible {
   background: var(--bg-2);
 }
 
-/* ============================ Inspector (right) ============================ */
+/* ============================ Inspector ============================ */
+
+/* Dock position toggle in the Files header */
+.dock-toggle {
+  color: var(--text-faint);
+  transition: color 0.15s;
+}
+.dock-toggle:hover {
+  color: var(--copper-bright) !important;
+}
 
 .filetree {
   padding: 6px 0;

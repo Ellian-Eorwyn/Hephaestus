@@ -128,6 +128,7 @@ interface State {
   theme: 'dark' | 'light'
   zen: boolean
   addModalOpen: boolean
+  inspectorDock: 'right' | 'bottom'
 
   // per active harness
   projects: ProjectSummary[]
@@ -164,6 +165,7 @@ interface State {
   setView: (v: View) => void
   toggleTheme: () => void
   toggleZen: () => void
+  toggleInspectorDock: () => void
   setAddModal: (open: boolean) => void
 
   // settings
@@ -227,6 +229,7 @@ export const useStore = create<State>((set, get) => {
     theme: (localStorage.getItem('heph.theme') as 'dark' | 'light') ?? 'dark',
     zen: false,
     addModalOpen: false,
+    inspectorDock: (localStorage.getItem('heph.inspectorDock') as 'right' | 'bottom') ?? 'right',
 
     settingsModalOpen: false,
     messageSpacing: settings.messageSpacing || 'compact',
@@ -325,6 +328,11 @@ export const useStore = create<State>((set, get) => {
   },
 
   toggleZen: () => set({ zen: !get().zen }),
+  toggleInspectorDock: () => {
+    const next = get().inspectorDock === 'right' ? 'bottom' : 'right'
+    localStorage.setItem('heph.inspectorDock', next)
+    set({ inspectorDock: next })
+  },
   setAddModal: (open) => set({ addModalOpen: open }),
 
   setSettingsModalOpen: (open) => set({ settingsModalOpen: open }),
