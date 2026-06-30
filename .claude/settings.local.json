@@ -28,7 +28,8 @@
       "Bash(grep -n \"^\\\\s*async\\\\|^\\\\s*public\\\\|^\\\\s*prompt\\\\|^\\\\s*subscribe\\\\|^\\\\s*steer\\\\|class AgentSession\" /Users/ellie/.pi-vault/repository/packages/coding-agent/src/core/agent-session.ts | head -50)",
       "Bash(find /Users/ellie/.pi-vault/repository -name \"README*\" -o -name \"AGENT*\" -type f | grep -v node_modules | head -20)",
       "Bash(find /Users/ellie/.pi-vault/repository/packages/coding-agent/examples/sdk -name \"*.ts\" -type f)",
-      "Bash(grep -n \"\\\\.jsonl\\\\|session.*file\\\\|sessionFile\" /Users/ellie/.pi-vault/repository/packages/coding-agent/src/core/agent-session.ts | head -20)"
+      "Bash(grep -n \"\\\\.jsonl\\\\|session.*file\\\\|sessionFile\" /Users/ellie/.pi-vault/repository/packages/coding-agent/src/core/agent-session.ts | head -20)",
+      "Bash(node -e \"console.log\\(require\\('readline'\\).Interface.prototype\\)\")"
     ]
   }
 }
