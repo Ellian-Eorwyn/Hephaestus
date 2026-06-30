@@ -9,6 +9,9 @@
  * (22, 6.5). Positive rotation lifts the head into the air; negative rotation
  * drives it down onto the anvil face.
  */
+import hammerImg from '../assets/hammer.png'
+import anvilImg from '../assets/anvil.png'
+
 export function ForgeAnvil({ size = 26 }: { size?: number }): JSX.Element {
   return (
     <svg
@@ -21,34 +24,22 @@ export function ForgeAnvil({ size = 26 }: { size?: number }): JSX.Element {
       fill="none"
     >
       {/* Anvil */}
-      <g className="anvil" fill="var(--text-2)">
-        {/* face + horn */}
-        <path d="M7 17 H22 L25 18.5 L22 20 H7 Z" />
-        {/* neck */}
-        <rect x="11" y="20" width="6" height="3" />
-        {/* base */}
-        <path d="M7 26 H21 L18.5 23 H9.5 Z" />
-      </g>
-
-      {/* Spark burst — keyed to fire only at the impact frame, over the strike point */}
-      <g className="sparks" stroke="var(--ember)" strokeWidth="1.1" strokeLinecap="round">
-        <line x1="12" y1="16" x2="9" y2="11.5" />
-        <line x1="12" y1="16" x2="12.5" y2="10.5" />
-        <line x1="12" y1="16" x2="16" y2="12.5" />
-        <circle cx="8.5" cy="11" r="0.7" fill="var(--copper-bright)" stroke="none" />
-        <circle cx="15.5" cy="11.5" r="0.7" fill="var(--gold)" stroke="none" />
+      <g className="anvil">
+        <image href={anvilImg} x="-2" y="10" width="28" height="23" />
       </g>
 
       {/* Hammer — head (left) on a handle running up-right to the pivot */}
       <g className="hammer">
-        {/* handle */}
-        <rect x="12.5" y="4.9" width="10.5" height="1.7" rx="0.85" fill="var(--copper-dim)" />
-        {/* head */}
-        <rect x="5.5" y="3" width="8.2" height="5" rx="1.3" fill="var(--copper)" />
-        {/* striking face */}
-        <rect x="5.5" y="6.2" width="8.2" height="1.8" rx="0.9" fill="var(--copper-dim)" />
-        {/* highlight on the poll */}
-        <rect x="11.4" y="3" width="2.3" height="5" rx="1.1" fill="var(--copper-bright)" />
+        <image href={hammerImg} x="5" y="-8" width="22" height="22" />
+      </g>
+
+      {/* Spark burst — keyed to fire only at the impact frame, over the strike point */}
+      <g className="sparks" stroke="red" strokeWidth="1.8" strokeLinecap="round">
+        <line x1="12" y1="16" x2="8" y2="10" />
+        <line x1="12" y1="16" x2="13" y2="9" />
+        <line x1="12" y1="16" x2="17" y2="11.5" />
+        <circle cx="7.5" cy="9.5" r="1.2" fill="red" stroke="none" />
+        <circle cx="16.5" cy="10.5" r="1.2" fill="red" stroke="none" />
       </g>
     </svg>
   )
