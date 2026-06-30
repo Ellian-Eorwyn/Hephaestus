@@ -1,25 +1,32 @@
 import { useEffect, useRef, useState } from 'react'
 import { Send, Square, Hammer, Flame, Paperclip, X } from 'lucide-react'
-import { useStore } from '../store/store'
+import { useStore, selectCurrentRun, isWorking } from '../store/store'
 import { MarkdownView } from './MarkdownView'
+import { ForgeAnvil } from './ForgeAnvil'
 import type { ThreadMessage } from '@shared/types'
 
 export function Forge(): JSX.Element {
   const session = useStore((s) => s.session)
   const loading = useStore((s) => s.loadingSession)
-  const streamingText = useStore((s) => s.streamingText)
-  const streamingThinking = useStore((s) => s.streamingThinking)
-  const agentStatus = useStore((s) => s.agentStatus)
+  const run = useStore(selectCurrentRun)
   const selectedSessionPath = useStore((s) => s.selectedSessionPath)
   const selectedCwd = useStore((s) => s.selectedCwd)
   const messageSpacing = useStore((s) => s.messageSpacing)
   const bottomRef = useRef<HTMLDivElement>(null)
 
+  const streamingText = run?.text ?? ''
+  const streamingThinking = run?.thinking ?? ''
+  const working = !!run && isWorking(run.status)
+  // The turn has finished streaming but the authoritative session hasn't swapped
+  // in yet — keep the text on screen as a settled assistant bubble (no hammer).
+  const settling = !!run && run.status === 'finalizing' && !!(streamingText || streamingThinking)
+
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [session?.messages.length, streamingText])
+  }, [session?.messages.length, streamingText, streamingThinking, working, settling])
 
-  if (!selectedSessionPath && !selectedCwd) {
+  // Nothing selected at all — the cold forge.
+  if (!selectedSessionPath && !selectedCwd && !run) {
     return (
       <div className="pane forge">
         <div className="empty">
@@ -33,7 +40,11 @@ export function Forge(): JSX.Element {
     )
   }
 
-  if (!selectedSessionPath && selectedCwd) {
+  // A project is open but nothing has been sent yet (no session, no live run) —
+  // show the "ready" placeholder. Once a prompt is sent the optimistic session /
+  // run appears and we fall through to the live thread below, even before the
+  // session file has been written and adopted from disk.
+  if (!selectedSessionPath && !session && !run) {
     return (
       <div className="pane forge">
         <div className="pane-header">
@@ -58,7 +69,7 @@ export function Forge(): JSX.Element {
     <div className="pane forge">
       <div className="pane-header">
         <Hammer size={14} className="copper" />
-        <span className="label-tech">Forge — Session</span>
+        <span className="label-tech">{selectedSessionPath ? 'Forge — Session' : 'Forge — New Session'}</span>
       </div>
       <div className="pane-body">
         {loading && !session ? (
@@ -70,28 +81,104 @@ export function Forge(): JSX.Element {
             {session?.messages.map((m) => (
               <Message key={m.id} m={m} />
             ))}
-            {agentStatus === 'running' && (streamingText || streamingThinking) && (
-              <div className="msg assistant">
-                <div className="avatar">
-                  <Hammer size={15} />
-                </div>
-                <div className="body">
-                  {streamingThinking && !streamingText && (
-                    <details className="thinking" open>
-                      <summary>✦ thinking</summary>
-                      <div className="content">{streamingThinking}</div>
-                    </details>
-                  )}
-                  {streamingText && <MarkdownView source={streamingText} />}
-                  <span className="muted">▍</span>
-                </div>
-              </div>
+            {run && working && (
+              <WorkingRow
+                status={run.status}
+                startedAt={run.startedAt}
+                currentTool={run.currentTool}
+                text={streamingText}
+                thinking={streamingThinking}
+              />
             )}
+            {settling && <SettledAssistant text={streamingText} thinking={streamingThinking} />}
             <div ref={bottomRef} />
           </div>
         )}
       </div>
       <Composer />
+    </div>
+  )
+}
+
+function WorkingRow({
+  status,
+  startedAt,
+  currentTool,
+  text,
+  thinking
+}: {
+  status: string
+  startedAt: number
+  currentTool?: string
+  text: string
+  thinking: string
+}): JSX.Element {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(t)
+  }, [])
+  const elapsed = Math.max(0, Math.floor((now - startedAt) / 1000))
+  const label =
+    status === 'finalizing'
+      ? 'Finishing'
+      : currentTool
+        ? `Running ${currentTool}`
+        : thinking && !text
+          ? 'Thinking'
+          : 'Forging'
+
+  return (
+    <div className="msg assistant working">
+      <div className="avatar">
+        <ForgeAnvil size={26} />
+      </div>
+      <div className="body">
+        <div className="working-head">
+          <span className="working-label">{label}…</span>
+          <span className="working-elapsed">{fmtElapsed(elapsed)}</span>
+        </div>
+        {thinking && !text && (
+          <details className="thinking" open>
+            <summary>✦ thinking</summary>
+            <div className="content">{thinking}</div>
+          </details>
+        )}
+        {text && <MarkdownView source={text} />}
+        {text && <span className="muted">▍</span>}
+      </div>
+    </div>
+  )
+}
+
+function fmtElapsed(s: number): string {
+  const m = Math.floor(s / 60)
+  const r = s % 60
+  return m ? `${m}m ${r}s` : `${r}s`
+}
+
+/**
+ * The just-finished streamed reply, shown as a calm assistant bubble while the
+ * authoritative session reload swaps in. Identical layout to a persisted
+ * assistant message so the handoff is visually seamless — and it guarantees the
+ * text never blinks out between "done streaming" and "reloaded".
+ */
+function SettledAssistant({ text, thinking }: { text: string; thinking: string }): JSX.Element {
+  const showThinking = useStore((s) => s.showThinking)
+  return (
+    <div className="msg assistant">
+      <div className="avatar">
+        <Hammer size={15} />
+      </div>
+      <div className="body">
+        {thinking && showThinking && !text && (
+          <details className="thinking">
+            <summary>✦ thinking</summary>
+            <div className="content">{thinking}</div>
+          </details>
+        )}
+        {text && <MarkdownView source={text} />}
+      </div>
     </div>
   )
 }
@@ -139,48 +226,82 @@ function Message({ m }: { m: ThreadMessage }): JSX.Element | null {
     )
   }
   // assistant
+  const showThinkingBlock = !!m.thinking && showThinking
+  const showToolBlocks = !!m.toolCalls && m.toolCalls.length > 0 && showTools
+  // Nothing visible to render (e.g. a thinking/tool-only turn with those panes
+  // toggled off) — skip the row entirely instead of leaving a lone avatar glyph.
+  if (!m.text && !showThinkingBlock && !showToolBlocks) return null
   return (
     <div className="msg assistant">
       <div className="avatar">
         <Hammer size={15} />
       </div>
       <div className="body">
-        {m.thinking && showThinking && (
+        {showThinkingBlock && (
           <details className="thinking">
             <summary>✦ thinking</summary>
             <div className="content">{m.thinking}</div>
           </details>
         )}
         {m.text && <MarkdownView source={m.text} />}
-        {m.toolCalls && showTools && m.toolCalls.map((tc) => (
-          <details className="toolblock" key={tc.id}>
-            <summary>⚙ {tc.name}</summary>
-            <div className="content">
-              <div className="toolargs">{formatArgs(tc.arguments)}</div>
-            </div>
-          </details>
-        ))}
+        {showToolBlocks &&
+          m.toolCalls!.map((tc) => (
+            <details className="toolblock" key={tc.id}>
+              <summary>⚙ {tc.name}</summary>
+              <div className="content">
+                <div className="toolargs">{formatArgs(tc.arguments)}</div>
+              </div>
+            </details>
+          ))}
+        <MsgStats m={m} />
       </div>
     </div>
   )
 }
 
+/** Compact per-response stats line: output tokens, throughput, model. */
+function MsgStats({ m }: { m: ThreadMessage }): JSX.Element | null {
+  const parts: string[] = []
+  if (m.outputTokens) parts.push(`${fmtTok(m.outputTokens)} out`)
+  if (m.tps) parts.push(`${m.tps >= 100 ? Math.round(m.tps) : m.tps.toFixed(1)} tok/s`)
+  if (m.usage?.cacheRead) parts.push(`${fmtTok(m.usage.cacheRead)} cached`)
+  if (m.model) parts.push(m.model)
+  if (parts.length === 0) return null
+  return <div className="msg-stats">{parts.join('  ·  ')}</div>
+}
+
+function fmtTok(n: number): string {
+  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n)
+}
+
+const COMPOSER_MAX_H = 160
+
 function Composer(): JSX.Element {
   const [text, setText] = useState('')
   const sendPrompt = useStore((s) => s.sendPrompt)
   const abort = useStore((s) => s.abort)
-  const agentStatus = useStore((s) => s.agentStatus)
+  const run = useStore(selectCurrentRun)
   const harnesses = useStore((s) => s.harnesses)
   const view = useStore((s) => s.view)
   const selectedCwd = useStore((s) => s.selectedCwd)
   const selectedFile = useStore((s) => s.selectedFile)
   const attachViewedFile = useStore((s) => s.attachViewedFile)
   const setAttachViewedFile = useStore((s) => s.setAttachViewedFile)
+  const taRef = useRef<HTMLTextAreaElement>(null)
 
   const harnessId = view === 'dashboard' ? null : view.harnessId
   const harness = harnesses.find((h) => h.id === harnessId)
   const canSend = !!harness?.cli && !!selectedCwd
   const showAttach = canSend && !!selectedFile
+
+  // Grow the textarea to fit its content (up to a cap, then scroll) so typed
+  // lines are never clipped at the top of the box.
+  useEffect(() => {
+    const el = taRef.current
+    if (!el) return
+    el.style.height = 'auto'
+    el.style.height = `${Math.min(el.scrollHeight, COMPOSER_MAX_H)}px`
+  }, [text])
 
   const submit = () => {
     const t = text.trim()
@@ -189,7 +310,7 @@ function Composer(): JSX.Element {
     setText('')
   }
 
-  const running = agentStatus === 'running'
+  const running = !!run && isWorking(run.status)
 
   return (
     <div className="composer">
@@ -218,6 +339,7 @@ function Composer(): JSX.Element {
       )}
       <div className="box">
         <textarea
+          ref={taRef}
           rows={1}
           placeholder={canSend ? 'Command the forge…' : 'Viewing only — no RPC launcher for this harness'}
           value={text}

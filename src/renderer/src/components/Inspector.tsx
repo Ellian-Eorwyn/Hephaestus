@@ -10,7 +10,8 @@ import {
   Folder,
   FolderOpen,
   Files,
-  Eye
+  Eye,
+  RefreshCw
 } from 'lucide-react'
 import { useStore } from '../store/store'
 import { MarkdownView } from './MarkdownView'
@@ -37,6 +38,7 @@ export function Inspector(): JSX.Element {
 function FileBrowser(): JSX.Element {
   const fileTree = useStore((s) => s.fileTree)
   const selectedCwd = useStore((s) => s.selectedCwd)
+  const refreshFiles = useStore((s) => s.refreshFiles)
 
   return (
     <div className="pane">
@@ -44,10 +46,23 @@ function FileBrowser(): JSX.Element {
         <Files size={14} className="copper" />
         <span className="label-tech">Files</span>
         {selectedCwd && (
-          <span className="muted" style={{ marginLeft: 'auto', fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={selectedCwd}>
+          <span
+            className="muted"
+            style={{ marginLeft: 'auto', maxWidth: 170, fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+            title={selectedCwd}
+          >
             {selectedCwd}
           </span>
         )}
+        <button
+          className="icon-btn"
+          style={{ marginLeft: selectedCwd ? 6 : 'auto', width: 24, height: 24 }}
+          title="Refresh files"
+          disabled={!selectedCwd}
+          onClick={() => void refreshFiles()}
+        >
+          <RefreshCw size={13} />
+        </button>
       </div>
       <div className="pane-body">
         {fileTree.length === 0 ? (

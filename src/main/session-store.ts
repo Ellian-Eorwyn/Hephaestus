@@ -124,13 +124,24 @@ export class SessionStore {
   watch(harnessId: string, agentDir: string, onChange: (filePath: string) => void): void {
     if (this.watchers.has(harnessId)) return
     const sessionsDir = path.join(agentDir, 'sessions')
-    const watcher = chokidar.watch(sessionsDir, {
-      ignoreInitial: true,
-      depth: 2,
-      awaitWriteFinish: { stabilityThreshold: 250, pollInterval: 50 }
-    })
+    // No awaitWriteFinish: it holds the add/change event until writes stop, which
+    // for an active turn is only at the very end. We want a session to surface
+    // (and its messages to reload) the instant the harness writes to it, so we
+    // fire on raw events and debounce per file instead. Partial trailing lines
+    // are tolerated by the JSONL parser.
+    const watcher = chokidar.watch(sessionsDir, { ignoreInitial: true, depth: 2 })
+    const timers = new Map<string, ReturnType<typeof setTimeout>>()
     const handler = (filePath: string) => {
-      if (filePath.endsWith('.jsonl')) onChange(filePath)
+      if (!filePath.endsWith('.jsonl')) return
+      const t = timers.get(filePath)
+      if (t) clearTimeout(t)
+      timers.set(
+        filePath,
+        setTimeout(() => {
+          timers.delete(filePath)
+          onChange(filePath)
+        }, 80)
+      )
     }
     watcher.on('add', handler).on('change', handler)
     this.watchers.set(harnessId, watcher)

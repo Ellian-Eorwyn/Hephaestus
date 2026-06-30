@@ -6,16 +6,23 @@ import type { FileNode, FileContent, SheetData } from '@shared/types'
 import chokidar from 'chokidar'
 
 const IGNORE = new Set(['.git', 'node_modules', '.DS_Store', '.venv', 'venv', '__pycache__', 'dist', 'out', '.next'])
-const IGNORE_PATTERNS = [
-  /(^|[\/\\])\.[^\/\\]/, // ignore dotfiles (except we want to allow some, but chokidar is noisy. Actually let's just use string globs for the main ones)
-  '**/node_modules/**',
-  '**/.venv/**',
-  '**/venv/**',
-  '**/__pycache__/**',
-  '**/dist/**',
-  '**/out/**',
-  '**/.next/**'
-]
+
+/**
+ * Single chokidar `ignored` predicate covering noisy dirs and dotfiles (except
+ * the few we surface in the tree). A function is more reliable than a mix of
+ * regex + globs, and it sees both the absolute path and the dirent.
+ */
+function isIgnoredPath(p: string): boolean {
+  for (const seg of p.split(path.sep)) {
+    if (!seg) continue
+    if (IGNORE.has(seg)) return true
+    if (seg.startsWith('.') && seg !== '.gitignore') return true
+  }
+  return false
+}
+
+/** Depth chokidar/readDir descend into a project before stopping. */
+const WATCH_DEPTH = 8
 
 const CODE_LANGS: Record<string, string> = {
   '.ts': 'typescript',
@@ -60,38 +67,47 @@ const MAX_ROWS = 1000
 const MAX_COLS = 60
 
 export class FileService {
-  private watcher: chokidar.FSWatcher | null = null
+  // One watcher per project cwd so concurrent/background runs all keep their
+  // file trees fresh — not a single watcher tied to the visible selection.
+  private watchers = new Map<string, chokidar.FSWatcher>()
 
-  /** Build a (lazily shallow) file tree for the given cwd, 1 level recursive per dir. */
+  /** Build a file tree for the given cwd, recursing up to WATCH_DEPTH levels. */
   async listFiles(cwd: string): Promise<FileNode[]> {
-    return this.readDir(cwd, 4)
+    return this.readDir(cwd, WATCH_DEPTH)
   }
 
+  /**
+   * Watch a project directory, debouncing change bursts. Idempotent per cwd:
+   * calling again for an already-watched cwd is a no-op (the existing watcher's
+   * callback is reused), so re-selecting a project never tears down a watcher
+   * that another active run depends on.
+   */
   watch(cwd: string, onChange: () => void): void {
-    if (this.watcher) {
-      void this.watcher.close()
-    }
-    
+    const key = path.resolve(cwd)
+    if (this.watchers.has(key)) return
+
+    // Coalesce rapid bursts but stay snappy. We deliberately do NOT use
+    // awaitWriteFinish: the tree only needs filenames, so a file should appear
+    // the instant it's created (fsevents on macOS) rather than after its content
+    // settles.
     let timeout: NodeJS.Timeout | null = null
     const notify = () => {
       if (timeout) clearTimeout(timeout)
-      timeout = setTimeout(() => { onChange() }, 200)
+      timeout = setTimeout(() => onChange(), 60)
     }
 
-    this.watcher = chokidar.watch(cwd, {
-      ignored: IGNORE_PATTERNS,
+    const watcher = chokidar.watch(key, {
+      ignored: (p: string) => isIgnoredPath(p),
       ignoreInitial: true,
-      depth: 4
+      depth: WATCH_DEPTH
     })
-    
-    this.watcher.on('all', notify)
+    watcher.on('all', notify)
+    this.watchers.set(key, watcher)
   }
 
   dispose(): void {
-    if (this.watcher) {
-      void this.watcher.close()
-      this.watcher = null
-    }
+    for (const w of this.watchers.values()) void w.close()
+    this.watchers.clear()
   }
 
   private async readDir(dir: string, depth: number): Promise<FileNode[]> {

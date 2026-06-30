@@ -142,6 +142,10 @@ export interface ThreadMessage {
   model?: string
   /** Absolute path of a file the user was viewing when they sent this message. */
   attachedFile?: string
+  /** Output tokens for this assistant turn (from usage), surfaced for the stats line. */
+  outputTokens?: number
+  /** Effective output tokens/sec for this turn (output ÷ response time), when derivable. */
+  tps?: number
 }
 
 export interface SessionSummary {
@@ -236,7 +240,12 @@ export interface BackendHealth {
 // ---------------------------------------------------------------------------
 
 export interface AgentEvent {
+  /** Stable id of the run this event belongs to (assigned by the driver on open). */
+  runId: string
   harnessId: string
+  /** Working directory the run was opened in. */
+  cwd?: string
+  /** Session .jsonl path once known (undefined for a brand-new chat until adopted). */
   sessionPath?: string
   /** Raw event type from the harness RPC stream. */
   type: string
@@ -245,16 +254,47 @@ export interface AgentEvent {
   /** Streaming reasoning/thinking delta, when present. */
   thinkingDelta?: string
   toolName?: string
+  // Abnormal-termination detail (carried on `error`/`agent_exit` events).
+  exitCode?: number | null
+  signal?: string | null
+  errorReason?: string
+  stderrTail?: string
   raw?: unknown
 }
 
-export type AgentStatus = 'idle' | 'starting' | 'running' | 'error' | 'closed'
+/** Lifecycle of a single driven run. */
+export type RunStatus = 'starting' | 'running' | 'finalizing' | 'idle' | 'error'
+
+/**
+ * A snapshot of a run held by the main-process registry. Returned by
+ * `agentListRuns` so a freshly-loaded or reconnecting renderer can rebuild its
+ * live state without a relaunch.
+ */
+export interface RunSnapshot {
+  runId: string
+  harnessId: string
+  cwd: string
+  sessionPath: string | null
+  status: RunStatus
+  currentTool?: string
+  /** Epoch ms when the run was opened. */
+  startedAt: number
+  /** Bounded rolling buffer of in-flight (not-yet-persisted) visible text. */
+  streamTail: string
+  /** Bounded rolling buffer of in-flight reasoning. */
+  thinkingTail: string
+  /** Human-readable failure reason when status === 'error'. */
+  error?: string
+}
 
 // ---------------------------------------------------------------------------
 // IPC channel contract (exposed via window.heph)
 // ---------------------------------------------------------------------------
 
 export interface HephApi {
+  /** Absolute path of a dropped File (replaces the removed `File.path`). */
+  getPathForFile(file: File): string
+
   listHarnesses(): Promise<HarnessConfig[]>
   addHarness(input: { label: string; agentDir: string }): Promise<HarnessConfig[]>
   removeHarness(id: string): Promise<HarnessConfig[]>
@@ -274,10 +314,16 @@ export interface HephApi {
   checkBackend(harnessId: string): Promise<BackendHealth>
 
   // Agent driver
-  agentOpen(input: { harnessId: string; cwd: string; sessionPath?: string }): Promise<{ ok: boolean; reason?: string }>
-  agentSend(input: { harnessId: string; text: string }): Promise<{ ok: boolean; reason?: string }>
-  agentAbort(harnessId: string): Promise<void>
-  agentClose(harnessId: string): Promise<void>
+  agentOpen(input: {
+    harnessId: string
+    cwd: string
+    sessionPath?: string
+  }): Promise<{ ok: boolean; reason?: string; runId?: string }>
+  agentSend(input: { runId: string; text: string }): Promise<{ ok: boolean; reason?: string }>
+  agentAbort(runId: string): Promise<void>
+  agentClose(runId: string): Promise<void>
+  /** Snapshot every live run so the renderer can resync after a reload/disconnect. */
+  agentListRuns(): Promise<RunSnapshot[]>
 
   // Subscriptions (return an unsubscribe fn)
   onSessionUpdated(cb: (payload: { harnessId: string; path: string }) => void): () => void

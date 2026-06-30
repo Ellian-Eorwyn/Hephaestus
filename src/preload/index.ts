@@ -1,8 +1,12 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { IPC } from '@shared/ipc'
 import type { HephApi, AgentEvent } from '@shared/types'
 
 const api: HephApi = {
+  // Resolve the absolute filesystem path of a dropped File. Electron 32+ removed
+  // the `File.path` property, so this is the supported replacement.
+  getPathForFile: (file) => webUtils.getPathForFile(file),
+
   listHarnesses: () => ipcRenderer.invoke(IPC.listHarnesses),
   addHarness: (input) => ipcRenderer.invoke(IPC.addHarness, input),
   removeHarness: (id) => ipcRenderer.invoke(IPC.removeHarness, id),
@@ -23,8 +27,9 @@ const api: HephApi = {
 
   agentOpen: (input) => ipcRenderer.invoke(IPC.agentOpen, input),
   agentSend: (input) => ipcRenderer.invoke(IPC.agentSend, input),
-  agentAbort: (harnessId) => ipcRenderer.invoke(IPC.agentAbort, harnessId),
-  agentClose: (harnessId) => ipcRenderer.invoke(IPC.agentClose, harnessId),
+  agentAbort: (runId) => ipcRenderer.invoke(IPC.agentAbort, runId),
+  agentClose: (runId) => ipcRenderer.invoke(IPC.agentClose, runId),
+  agentListRuns: () => ipcRenderer.invoke(IPC.agentListRuns),
 
   onSessionUpdated: (cb) => {
     const listener = (_e: unknown, payload: { harnessId: string; path: string }) => cb(payload)

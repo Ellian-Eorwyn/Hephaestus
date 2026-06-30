@@ -14,7 +14,8 @@ import {
   Trash2,
   X
 } from 'lucide-react'
-import { useStore, projectKey } from '../store/store'
+import { useStore, projectKey, samePath, isActive } from '../store/store'
+import { ForgeAnvil } from './ForgeAnvil'
 import type { ProjectSummary } from '@shared/types'
 
 function formatTokens(n: number): string {
@@ -58,11 +59,17 @@ export function Projects(): JSX.Element {
     e.preventDefault()
     e.stopPropagation()
     setDragOver(false)
+    const items = e.dataTransfer.items
     const files = e.dataTransfer.files
     for (let i = 0; i < files.length; i++) {
       const file = files[i]
-      // Electron exposes the full filesystem path on dropped files.
-      const filePath = (file as unknown as { path: string }).path
+      // Only add folders, not loose files. A dropped directory has an empty MIME
+      // type and (via the items list) kind 'file' with a directory entry.
+      const entry = items[i]?.webkitGetAsEntry?.()
+      if (entry && !entry.isDirectory) continue
+      // Electron 32+ removed File.path; resolve via webUtils (with a legacy fallback).
+      const filePath =
+        window.heph.getPathForFile?.(file) ?? (file as unknown as { path?: string }).path
       if (filePath) void addProject(filePath)
     }
   }
@@ -177,10 +184,15 @@ function ProjectRow({
   const unarchive = useStore((s) => s.unarchive)
   const deleteProject = useStore((s) => s.deleteProject)
 
+  const runs = useStore((s) => s.runs)
+  const projectRunning = Object.values(runs).some(
+    (r) => isActive(r.status) && samePath(r.cwd, p.cwd)
+  )
+
   const key = harnessId ? projectKey(harnessId, p.encoded) : p.encoded
   const open = !!expanded[p.encoded] && !selectionMode
   const checked = selectedForArchive.includes(key)
-  const isSelected = selectedCwd === p.cwd
+  const isSelected = samePath(selectedCwd, p.cwd)
 
   const onRowClick = () => {
     if (selectionMode && !archived) {
@@ -209,6 +221,11 @@ function ProjectRow({
         <span className="pname" title={p.cwd}>
           {p.name}
         </span>
+        {projectRunning && (
+          <span className="run-badge" title="Agent is working in this project">
+            <ForgeAnvil size={18} />
+          </span>
+        )}
         {archived ? (
           <div className="project-actions">
             <button
@@ -249,19 +266,25 @@ function ProjectRow({
         )}
       </div>
       {open &&
-        p.sessions.map((sess) => (
-          <div
-            key={sess.path}
-            className={`session-row ${selectedSessionPath === sess.path ? 'active' : ''}`}
-            onClick={() => harnessId && selectSession(harnessId, sess.path, p.cwd)}
-          >
-            <MessageSquare size={13} className="muted" />
-            <span className="stitle" title={sess.title}>
-              {sess.title}
-            </span>
-            {sess.totalTokens > 0 && <span className="stoks">{formatTokens(sess.totalTokens)}</span>}
-          </div>
-        ))}
+        p.sessions.map((sess) => {
+          const sessionRunning = Object.values(runs).some(
+            (r) => isActive(r.status) && samePath(r.sessionPath, sess.path)
+          )
+          return (
+            <div
+              key={sess.path}
+              className={`session-row ${selectedSessionPath === sess.path ? 'active' : ''}`}
+              onClick={() => harnessId && selectSession(harnessId, sess.path, p.cwd)}
+            >
+              <MessageSquare size={13} className="muted" />
+              <span className="stitle" title={sess.title}>
+                {sess.title}
+              </span>
+              {sessionRunning && <span className="run-dot" title="Working" />}
+              {sess.totalTokens > 0 && <span className="stoks">{formatTokens(sess.totalTokens)}</span>}
+            </div>
+          )
+        })}
     </div>
   )
 }

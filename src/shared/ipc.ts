@@ -23,6 +23,7 @@ export const IPC = {
   agentSend: 'agent:send',
   agentAbort: 'agent:abort',
   agentClose: 'agent:close',
+  agentListRuns: 'agent:listRuns',
 
   // main -> renderer events
   evtSessionUpdated: 'evt:sessionUpdated',

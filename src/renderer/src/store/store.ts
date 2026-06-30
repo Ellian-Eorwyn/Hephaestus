@@ -7,6 +7,8 @@ import type {
   FileContent,
   BackendHealth,
   AgentEvent,
+  RunStatus,
+  RunSnapshot,
   ThreadMessage
 } from '@shared/types'
 import { wrapWithViewingContext } from '@shared/viewing-context'
@@ -14,6 +16,79 @@ import { wrapWithViewingContext } from '@shared/viewing-context'
 const heph = window.heph
 
 type View = 'dashboard' | { harnessId: string }
+
+/** Renderer-side mirror of a main-process run, with accumulated stream text. */
+export interface RunState {
+  runId: string
+  harnessId: string
+  cwd: string
+  sessionPath: string | null
+  status: RunStatus
+  currentTool?: string
+  startedAt: number
+  /** Accumulated visible stream for this run. */
+  text: string
+  /** Accumulated reasoning stream for this run. */
+  thinking: string
+  error?: string
+}
+
+const ACTIVE: RunStatus[] = ['starting', 'running', 'finalizing']
+export function isActive(status: RunStatus): boolean {
+  return ACTIVE.includes(status)
+}
+
+/**
+ * Whether the agent is actively producing output — drives the hammer/anvil
+ * animation and the Stop button. `finalizing` is excluded: the turn is done and
+ * its text is settled, just awaiting the authoritative reload, so it renders as a
+ * calm assistant bubble rather than a striking hammer.
+ */
+export function isWorking(status: RunStatus): boolean {
+  return status === 'starting' || status === 'running'
+}
+
+/** Trailing-slash-tolerant path equality (renderer has no node:path). */
+export function samePath(a?: string | null, b?: string | null): boolean {
+  if (!a || !b) return false
+  const norm = (p: string) => p.replace(/\/+$/, '')
+  return norm(a) === norm(b)
+}
+
+/**
+ * The run feeding the currently-viewed session: matched by sessionPath when a
+ * session is selected, or — for a brand-new chat not yet written to disk — the
+ * pathless run for the selected cwd.
+ */
+export function selectCurrentRun(s: {
+  runs: Record<string, RunState>
+  selectedSessionPath: string | null
+  selectedCwd: string | null
+}): RunState | null {
+  const list = Object.values(s.runs)
+  if (s.selectedSessionPath) {
+    return list.find((r) => samePath(r.sessionPath, s.selectedSessionPath)) ?? null
+  }
+  if (s.selectedCwd) {
+    return list.find((r) => !r.sessionPath && samePath(r.cwd, s.selectedCwd) && isActive(r.status)) ?? null
+  }
+  return null
+}
+
+function snapshotToRun(s: RunSnapshot): RunState {
+  return {
+    runId: s.runId,
+    harnessId: s.harnessId,
+    cwd: s.cwd,
+    sessionPath: s.sessionPath,
+    status: s.status,
+    currentTool: s.currentTool,
+    startedAt: s.startedAt,
+    text: s.streamTail,
+    thinking: s.thinkingTail,
+    error: s.error
+  }
+}
 
 /** Stable key identifying a project within a harness (used for archiving). */
 export function projectKey(harnessId: string, encoded: string): string {
@@ -40,7 +115,9 @@ function loadSettings() {
     messageSpacing: 'compact',
     showThinking: true,
     showTools: true,
-    showToolResults: true
+    showToolResults: true,
+    autoAttachFile: true,
+    reduceMotion: false
   }
 }
 
@@ -67,10 +144,10 @@ interface State {
   session: SessionDetail | null
   loadingSession: boolean
 
-  // streaming
-  agentStatus: 'idle' | 'running'
-  streamingText: string
-  streamingThinking: string
+  // live runs (keyed by runId) — renderer mirror of the main-process registry
+  runs: Record<string, RunState>
+  /** True while a resync (agentListRuns) is in flight, for the reconnect chip. */
+  reconnecting: boolean
 
   // inspector
   fileTree: FileNode[]
@@ -95,13 +172,18 @@ interface State {
   showThinking: boolean
   showTools: boolean
   showToolResults: boolean
+  autoAttachFile: boolean
+  reduceMotion: boolean
   setSettingsModalOpen: (open: boolean) => void
+  setTheme: (theme: 'dark' | 'light') => void
   updateSettings: (
     updates: Partial<{
       messageSpacing: 'compact' | 'cozy' | 'comfortable'
       showThinking: boolean
       showTools: boolean
       showToolResults: boolean
+      autoAttachFile: boolean
+      reduceMotion: boolean
     }>
   ) => void
 
@@ -121,6 +203,7 @@ interface State {
   deleteProject: (encoded: string) => Promise<void>
   selectSession: (harnessId: string, path: string, cwd: string) => Promise<void>
   selectFile: (path: string) => Promise<void>
+  refreshFiles: () => Promise<void>
   setAttachViewedFile: (on: boolean) => void
   refreshBackend: (harnessId: string) => Promise<void>
   addProject: (cwd: string) => Promise<void>
@@ -130,6 +213,8 @@ interface State {
   abort: () => Promise<void>
   applySessionUpdate: (path: string) => Promise<void>
   applyAgentEvent: (e: AgentEvent) => void
+  finalizeRun: (runId: string, attempt?: number) => Promise<void>
+  resyncRuns: () => Promise<void>
 }
 
 export const useStore = create<State>((set, get) => {
@@ -147,6 +232,8 @@ export const useStore = create<State>((set, get) => {
     showThinking: settings.showThinking ?? true,
     showTools: settings.showTools ?? true,
     showToolResults: settings.showToolResults ?? true,
+    autoAttachFile: settings.autoAttachFile ?? true,
+    reduceMotion: settings.reduceMotion ?? false,
 
     projects: [],
   expanded: {},
@@ -160,19 +247,19 @@ export const useStore = create<State>((set, get) => {
   session: null,
   loadingSession: false,
 
-  agentStatus: 'idle',
-  streamingText: '',
-  streamingThinking: '',
+  runs: {},
+  reconnecting: false,
 
   fileTree: [],
   selectedFile: null,
   fileContent: null,
-  attachViewedFile: true,
+  attachViewedFile: settings.autoAttachFile ?? true,
 
   backend: {},
 
   init: async () => {
     document.documentElement.setAttribute('data-theme', get().theme)
+    document.documentElement.setAttribute('data-reduce-motion', String(get().reduceMotion))
     const harnesses = await heph.listHarnesses()
     set({ harnesses })
 
@@ -182,9 +269,18 @@ export const useStore = create<State>((set, get) => {
     })
     heph.onAgentEvent((e) => get().applyAgentEvent(e))
     heph.onProjectChanged((cwd) => {
-      if (get().selectedCwd === cwd) {
+      if (samePath(get().selectedCwd, cwd)) {
         heph.listFiles(cwd).then((fileTree) => set({ fileTree })).catch(() => {})
       }
+    })
+
+    // Reconnect to any in-flight runs now (survives renderer reloads) and again
+    // whenever the window regains focus, so a stale/disconnected UI self-heals
+    // without a relaunch.
+    void get().resyncRuns()
+    window.addEventListener('focus', () => void get().resyncRuns())
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') void get().resyncRuns()
     })
 
     // Kick a backend check per harness (best-effort).
@@ -204,23 +300,24 @@ export const useStore = create<State>((set, get) => {
     // Switching to a different harness must clear the center/inspector selection,
     // otherwise the previous harness's session/files stay on screen.
     if (prevId !== nextId) {
+      // Clear only the selection — never the run registry. A run for the
+      // previous harness keeps streaming in the background and stays visible
+      // via its sidebar badge / on return.
       set({
         selectedSessionPath: null,
         session: null,
         selectedCwd: null,
         fileTree: [],
         selectedFile: null,
-        fileContent: null,
-        agentStatus: 'idle',
-        streamingText: '',
-        streamingThinking: ''
+        fileContent: null
       })
     }
     if (nextId) void get().loadProjects(nextId)
   },
 
-  toggleTheme: () => {
-    const theme = get().theme === 'dark' ? 'light' : 'dark'
+  toggleTheme: () => get().setTheme(get().theme === 'dark' ? 'light' : 'dark'),
+
+  setTheme: (theme) => {
     localStorage.setItem('heph.theme', theme)
     document.documentElement.setAttribute('data-theme', theme)
     set({ theme })
@@ -236,9 +333,14 @@ export const useStore = create<State>((set, get) => {
         messageSpacing: updates.messageSpacing ?? s.messageSpacing,
         showThinking: updates.showThinking ?? s.showThinking,
         showTools: updates.showTools ?? s.showTools,
-        showToolResults: updates.showToolResults ?? s.showToolResults
+        showToolResults: updates.showToolResults ?? s.showToolResults,
+        autoAttachFile: updates.autoAttachFile ?? s.autoAttachFile,
+        reduceMotion: updates.reduceMotion ?? s.reduceMotion
       }
       localStorage.setItem('heph.settings', JSON.stringify(next))
+      if (updates.reduceMotion !== undefined) {
+        document.documentElement.setAttribute('data-reduce-motion', String(next.reduceMotion))
+      }
       return next
     })
   },
@@ -270,10 +372,7 @@ export const useStore = create<State>((set, get) => {
     set({
       selectedCwd: cwd,
       selectedSessionPath: null,
-      session: null,
-      streamingText: '',
-      streamingThinking: '',
-      agentStatus: 'idle'
+      session: null
     })
     try {
       void heph.watchProject(cwd)
@@ -288,10 +387,7 @@ export const useStore = create<State>((set, get) => {
     set({
       selectedCwd: cwd,
       selectedSessionPath: null,
-      session: null,
-      streamingText: '',
-      streamingThinking: '',
-      agentStatus: 'idle'
+      session: null
     })
     try {
       void heph.watchProject(cwd)
@@ -339,7 +435,7 @@ export const useStore = create<State>((set, get) => {
   },
 
   selectSession: async (harnessId, path, cwd) => {
-    set({ selectedSessionPath: path, selectedCwd: cwd, loadingSession: true, streamingText: '' })
+    set({ selectedSessionPath: path, selectedCwd: cwd, loadingSession: true })
     const session = await heph.loadSession(harnessId, path)
     set({ session, loadingSession: false })
     // Load the file tree for this project's cwd.
@@ -353,13 +449,25 @@ export const useStore = create<State>((set, get) => {
   },
 
   selectFile: async (path) => {
-    // Opening a new file re-enables auto-attach for it.
-    set({ selectedFile: path, attachViewedFile: true })
+    // Opening a new file applies the auto-attach default (Settings).
+    set({ selectedFile: path, attachViewedFile: get().autoAttachFile })
     try {
       const fileContent = await heph.readFile(path)
       set({ fileContent })
     } catch {
       set({ fileContent: null })
+    }
+  },
+
+  refreshFiles: async () => {
+    const cwd = get().selectedCwd
+    if (!cwd) return
+    try {
+      void heph.watchProject(cwd)
+      const fileTree = await heph.listFiles(cwd)
+      set({ fileTree })
+    } catch {
+      // ignore
     }
   },
 
@@ -417,15 +525,13 @@ export const useStore = create<State>((set, get) => {
       return {
         session: s.session
           ? { ...s.session, messages: [...s.session.messages, userMsg] }
-          : fakeSession,
-        agentStatus: 'running',
-        streamingText: '',
-        streamingThinking: ''
+          : fakeSession
       }
     })
-    const open = await heph.agentOpen({ harnessId, cwd, sessionPath: get().selectedSessionPath ?? undefined })
-    if (!open.ok) {
-      set({ agentStatus: 'idle' })
+
+    const sessionPath = get().selectedSessionPath ?? undefined
+    const open = await heph.agentOpen({ harnessId, cwd, sessionPath })
+    if (!open.ok || !open.runId) {
       // Surface the reason as a system message.
       set((s) => ({
         session: s.session
@@ -440,45 +546,273 @@ export const useStore = create<State>((set, get) => {
       }))
       return
     }
-    await heph.agentSend({ harnessId, text: sentText })
+
+    const runId = open.runId
+    set((s) => {
+      // Drop any stale run for the same target (e.g. a prior errored or idle run
+      // for this session) so exactly one run matches the viewed session.
+      const runs: Record<string, RunState> = {}
+      for (const [id, r] of Object.entries(s.runs)) {
+        const sameTarget = sessionPath
+          ? samePath(r.sessionPath, sessionPath)
+          : !r.sessionPath && samePath(r.cwd, cwd)
+        if (!sameTarget) runs[id] = r
+      }
+      runs[runId] = {
+        runId,
+        harnessId,
+        cwd,
+        sessionPath: sessionPath ?? null,
+        status: 'running',
+        startedAt: Date.now(),
+        text: '',
+        thinking: ''
+      }
+      return { runs }
+    })
+    await heph.agentSend({ runId, text: sentText })
   },
 
   abort: async () => {
-    const harnessId = get().activeHarnessId()
-    if (harnessId) await heph.agentAbort(harnessId)
-    set({ agentStatus: 'idle' })
+    const run = selectCurrentRun(get())
+    if (!run) return
+    await heph.agentAbort(run.runId)
+    set((s) => ({ runs: { ...s.runs, [run.runId]: { ...run, status: 'idle' } } }))
   },
 
   applySessionUpdate: async (path) => {
-    const { selectedSessionPath, view, selectedCwd } = get()
+    const { view } = get()
     if (view === 'dashboard') return
 
-    // Re-fetch project list so the sidebar shows the new session
+    // Re-fetch project list so the sidebar shows the new/updated session.
     void get().loadProjects(view.harnessId)
 
-    if (selectedSessionPath === null) {
-      const session = await heph.loadSession(view.harnessId, path)
-      if (session.header.cwd === selectedCwd) {
-        set({ session, selectedSessionPath: path })
+    const { selectedSessionPath, selectedCwd } = get()
+    const viewing =
+      samePath(path, selectedSessionPath) || (selectedSessionPath === null && selectedCwd != null)
+
+    if (viewing) {
+      let session: SessionDetail
+      try {
+        session = await heph.loadSession(view.harnessId, path)
+      } catch {
+        // The file may not be fully written yet (e.g. a just-bound new session);
+        // a later watcher event will reload it.
+        return
       }
-      return
+      const headerCwd = session.header.cwd ?? ''
+      if (selectedSessionPath === null) {
+        if (samePath(headerCwd, selectedCwd)) set({ session, selectedSessionPath: path })
+      } else {
+        set({ session })
+      }
+      // Bind any pathless run for this cwd to the now-known session path.
+      set((s) => {
+        const runs = { ...s.runs }
+        let changed = false
+        for (const [id, r] of Object.entries(runs)) {
+          if (!r.sessionPath && samePath(r.cwd, headerCwd)) {
+            runs[id] = { ...r, sessionPath: path }
+            changed = true
+          }
+        }
+        return changed ? { runs } : {}
+      })
     }
 
-    if (path !== selectedSessionPath) return
-    const session = await heph.loadSession(view.harnessId, path)
-    set({ session })
+    // Reconcile: retire a finalizing run for this session only once its reply is
+    // actually on disk (last message is an assistant turn), so the streamed text
+    // is never dropped before the authoritative bubble can replace it.
+    const reloaded = get().session
+    const last = reloaded?.messages[reloaded.messages.length - 1]
+    const replyLanded =
+      !!last && last.role === 'assistant' && samePath(reloaded?.path, path)
+    if (replyLanded) {
+      set((s) => {
+        const runs = { ...s.runs }
+        let changed = false
+        for (const [id, r] of Object.entries(runs)) {
+          if (samePath(r.sessionPath, path) && r.status === 'finalizing') {
+            delete runs[id]
+            changed = true
+          }
+        }
+        return changed ? { runs } : {}
+      })
+    }
   },
 
   applyAgentEvent: (e) => {
-    if (e.delta) {
-      set((s) => ({ streamingText: s.streamingText + e.delta }))
+    const runId = e.runId
+    if (!runId) return
+    const { type } = e
+
+    // Only actual output (deltas/tool activity) may create a run. Trailing/meta
+    // events — late get_state responses, post-completion notices — must NOT
+    // resurrect a run that finalizeRun already retired, or the working indicator
+    // would restart with no agent_end ever coming.
+    const isWork = !!(e.delta || e.thinkingDelta || e.toolName)
+
+    set((s) => {
+      const prev = s.runs[runId]
+      if (!prev && !isWork) return {}
+      const next: RunState = prev
+        ? { ...prev }
+        : {
+            runId,
+            harnessId: e.harnessId,
+            cwd: e.cwd ?? '',
+            sessionPath: e.sessionPath ?? null,
+            status: 'running',
+            startedAt: Date.now(),
+            text: '',
+            thinking: ''
+          }
+      if (e.cwd && !next.cwd) next.cwd = e.cwd
+      if (e.sessionPath && !next.sessionPath) next.sessionPath = e.sessionPath
+      if (e.delta) next.text += e.delta
+      if (e.thinkingDelta) next.thinking += e.thinkingDelta
+      if (e.toolName) next.currentTool = e.toolName
+      if (isActive(next.status) && (e.delta || e.thinkingDelta || e.toolName)) next.status = 'running'
+
+      if (type === 'agent_end') {
+        next.status = 'finalizing'
+        next.currentTool = undefined
+      } else if (type === 'agent_exit') {
+        if (next.status !== 'error' && next.status !== 'finalizing') next.status = 'idle'
+      } else if (type === 'error') {
+        next.status = 'error'
+        next.error = e.errorReason ?? 'Run failed.'
+      }
+
+      return { runs: { ...s.runs, [runId]: next } }
+    })
+
+    if (type === 'session_bound' && e.sessionPath) {
+      // The harness revealed the new session's file path (and it now exists on
+      // disk). Navigate to it immediately using this run's own cwd — more robust
+      // than matching the file's header cwd — then load details + refresh the
+      // sidebar via applySessionUpdate.
+      const path = e.sessionPath
+      const st = get()
+      const run = st.runs[runId]
+      if (st.selectedSessionPath === null && run && samePath(st.selectedCwd, run.cwd)) {
+        set({ selectedSessionPath: path })
+      }
+      void get().applySessionUpdate(path)
     }
-    if (e.thinkingDelta) {
-      set((s) => ({ streamingThinking: s.streamingThinking + e.thinkingDelta }))
+
+    if (type === 'agent_end') {
+      // Deterministically swap the streamed text for the authoritative session
+      // and retire the run — rather than racing the file watcher / a timer,
+      // which could drop the text before the reload repaints it.
+      void get().finalizeRun(runId)
     }
-    if (e.type === 'agent_end' || e.type === 'agent_exit') {
-      // The watcher reloads the authoritative session; clear the stream buffers.
-      set({ agentStatus: 'idle', streamingText: '', streamingThinking: '' })
+
+    if (type === 'error') {
+      // Surface full detail (reason + stderr tail) inline on the viewed session.
+      const detail = `${e.errorReason ?? 'Run failed.'}${e.stderrTail ? `\n\n${e.stderrTail}` : ''}`
+      set((s) => {
+        const run = s.runs[runId]
+        const viewing =
+          run &&
+          (samePath(run.sessionPath, s.selectedSessionPath) ||
+            (s.selectedSessionPath === null && samePath(run.cwd, s.selectedCwd)))
+        if (!viewing || !s.session) return {}
+        return {
+          session: {
+            ...s.session,
+            messages: [
+              ...s.session.messages,
+              { id: `sys-${Date.now()}`, role: 'system', text: `⚠ ${detail}` }
+            ]
+          }
+        }
+      })
+    }
+  },
+
+  finalizeRun: async (runId, attempt = 0) => {
+    const { view } = get()
+    if (view === 'dashboard') return
+    const run = get().runs[runId]
+    if (!run || run.status !== 'finalizing') return
+
+    // Without a known session path (a brand-new chat not yet adopted) we can't
+    // load the authoritative file; leave the settled stream visible and let the
+    // session watcher's adoption pass reconcile it. The text stays on screen.
+    const sessionPath = run.sessionPath
+    if (!sessionPath) return
+
+    let session: SessionDetail | null = null
+    try {
+      session = await heph.loadSession(view.harnessId, sessionPath)
+    } catch {
+      session = null
+    }
+
+    // Only retire the run (and swap in the authoritative session) once the reply
+    // is actually present (last message is an assistant turn). Until then the
+    // streamed text stays on screen — it is never dropped before its replacement
+    // exists. The harness writes the message just before/around agent_end, so a
+    // couple of short retries cover the file-flush race without trusting the
+    // watcher alone.
+    const last = session?.messages[session.messages.length - 1]
+    const replyLanded = !!session && !!last && last.role === 'assistant'
+
+    if (!replyLanded) {
+      if (attempt < 6) setTimeout(() => void get().finalizeRun(runId, attempt + 1), 500)
+      return
+    }
+
+    const st = get()
+    const isViewed =
+      samePath(st.selectedSessionPath, sessionPath) ||
+      (st.selectedSessionPath === null && samePath(st.selectedCwd, run.cwd))
+
+    set((s) => {
+      const runs = { ...s.runs }
+      delete runs[runId]
+      return isViewed
+        ? { runs, session: session as SessionDetail, selectedSessionPath: sessionPath }
+        : { runs }
+    })
+  },
+
+  resyncRuns: async () => {
+    set({ reconnecting: true })
+    try {
+      const snaps = await heph.agentListRuns()
+      set((s) => {
+        const runs: Record<string, RunState> = {}
+        // Preserve local transient runs: finalizing (awaiting authoritative
+        // reload) and error (shown inline). These take precedence over whatever
+        // the registry reports for the same id.
+        for (const [id, r] of Object.entries(s.runs)) {
+          if (r.status === 'finalizing' || r.status === 'error') runs[id] = r
+        }
+        // Adopt only *active* runs from the source of truth. Inactive (idle)
+        // registry runs are dropped, and local active runs the registry no longer
+        // knows about disappear — that's what un-sticks a disconnected UI.
+        for (const snap of snaps) {
+          if (!isActive(snap.status)) continue
+          if (runs[snap.runId]) continue
+          const fresh = snapshotToRun(snap)
+          const prev = s.runs[snap.runId]
+          if (prev) {
+            // Keep whichever accumulation is longer — we may have streamed past
+            // the bounded snapshot tail, or the snapshot may be ahead of us.
+            if (prev.text.length >= fresh.text.length) fresh.text = prev.text
+            if (prev.thinking.length >= fresh.thinking.length) fresh.thinking = prev.thinking
+          }
+          runs[snap.runId] = fresh
+        }
+        return { runs }
+      })
+    } catch {
+      // ignore — best effort
+    } finally {
+      set({ reconnecting: false })
     }
   }
   }

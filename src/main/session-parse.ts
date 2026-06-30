@@ -116,8 +116,15 @@ function blockText(message: RawMessage): {
 export function toThread(records: SessionRecord[]): ThreadMessage[] {
   const thread = resolveLeafThread(records)
   const messages: ThreadMessage[] = []
+  // Timestamp (ms) of the previous record in the thread, used to estimate the
+  // response time of each assistant turn for the tokens/sec stat.
+  let prevTs: number | null = null
   for (const r of thread) {
-    if (r.type !== 'message' || !r.message) continue
+    const curTs = r.timestamp ? Date.parse(r.timestamp) : NaN
+    if (r.type !== 'message' || !r.message) {
+      if (!Number.isNaN(curTs)) prevTs = curTs
+      continue
+    }
     const m = r.message
     if (m.role === 'toolResult') {
       const text = (m.content ?? [])
@@ -129,6 +136,7 @@ export function toThread(records: SessionRecord[]): ThreadMessage[] {
         timestamp: r.timestamp,
         toolResult: { toolCallId: m.toolCallId, toolName: m.toolName, isError: m.isError, text }
       })
+      if (!Number.isNaN(curTs)) prevTs = curTs
       continue
     }
     const { text, thinking, toolCalls } = blockText(m)
@@ -141,6 +149,19 @@ export function toThread(records: SessionRecord[]): ThreadMessage[] {
       displayText = parsed.text
       attachedFile = parsed.file
     }
+
+    // Per-turn stats: effective output tokens/sec = output ÷ response time, where
+    // response time is from the prior record to this assistant message.
+    let outputTokens: number | undefined
+    let tps: number | undefined
+    if (m.role === 'assistant') {
+      outputTokens = m.usage?.output
+      if (outputTokens && prevTs != null && !Number.isNaN(curTs)) {
+        const seconds = (curTs - prevTs) / 1000
+        if (seconds > 0.05 && seconds < 3600) tps = outputTokens / seconds
+      }
+    }
+
     messages.push({
       id: r.id ?? cryptoId(),
       role: m.role,
@@ -150,8 +171,11 @@ export function toThread(records: SessionRecord[]): ThreadMessage[] {
       toolCalls: toolCalls.length ? toolCalls : undefined,
       usage: m.usage,
       model: m.responseModel ?? m.model,
-      attachedFile
+      attachedFile,
+      outputTokens,
+      tps
     })
+    if (!Number.isNaN(curTs)) prevTs = curTs
   }
   return messages
 }

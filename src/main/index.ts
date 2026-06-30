@@ -62,7 +62,7 @@ function registerIpc(): void {
     return list
   })
   ipcMain.handle(IPC.removeHarness, async (_e, id: string) => {
-    agent.close(id)
+    agent.closeHarness(id)
     return registry.remove(id)
   })
 
@@ -137,11 +137,12 @@ function registerIpc(): void {
     if (!h) return { ok: false, reason: 'Unknown harness' }
     return agent.open(h, input.cwd, input.sessionPath)
   })
-  ipcMain.handle(IPC.agentSend, async (_e, input: { harnessId: string; text: string }) =>
-    agent.send(input.harnessId, input.text)
+  ipcMain.handle(IPC.agentSend, async (_e, input: { runId: string; text: string }) =>
+    agent.send(input.runId, input.text)
   )
-  ipcMain.handle(IPC.agentAbort, async (_e, harnessId: string) => agent.abort(harnessId))
-  ipcMain.handle(IPC.agentClose, async (_e, harnessId: string) => agent.close(harnessId))
+  ipcMain.handle(IPC.agentAbort, async (_e, runId: string) => agent.abort(runId))
+  ipcMain.handle(IPC.agentClose, async (_e, runId: string) => agent.close(runId))
+  ipcMain.handle(IPC.agentListRuns, async () => agent.snapshot())
 }
 
 app.whenReady().then(async () => {
@@ -157,11 +158,13 @@ app.whenReady().then(async () => {
 
 app.on('window-all-closed', async () => {
   agent.disposeAll()
+  files.dispose()
   await sessions.dispose()
   if (process.platform !== 'darwin') app.quit()
 })
 
 app.on('before-quit', async () => {
   agent.disposeAll()
+  files.dispose()
   await sessions.dispose()
 })

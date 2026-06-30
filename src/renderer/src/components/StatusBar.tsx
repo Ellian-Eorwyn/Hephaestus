@@ -1,4 +1,4 @@
-import { useStore } from '../store/store'
+import { useStore, isActive } from '../store/store'
 
 function fmt(n: number): string {
   if (n >= 1000) return `${(n / 1000).toFixed(1)}k`
@@ -9,10 +9,12 @@ export function StatusBar(): JSX.Element {
   const session = useStore((s) => s.session)
   const view = useStore((s) => s.view)
   const backend = useStore((s) => s.backend)
-  const agentStatus = useStore((s) => s.agentStatus)
+  const runs = useStore((s) => s.runs)
+  const reconnecting = useStore((s) => s.reconnecting)
 
   const harnessId = view === 'dashboard' ? null : view.harnessId
   const health = harnessId ? backend[harnessId] : undefined
+  const runningCount = Object.values(runs).filter((r) => isActive(r.status)).length
 
   const ctxWindow = session?.contextWindow ?? null
   const ctxUsed = session?.currentContextTokens ?? 0
@@ -37,7 +39,10 @@ export function StatusBar(): JSX.Element {
         </span>
       )}
       {health?.online && health.models[0] && <span className="muted">{health.models[0]}</span>}
-      {agentStatus === 'running' && <span className="copper">● RUNNING</span>}
+      {runningCount > 0 && (
+        <span className="copper">● {runningCount > 1 ? `${runningCount} RUNNING` : 'RUNNING'}</span>
+      )}
+      {reconnecting && <span className="muted">reconnecting…</span>}
       <span className="spacer" />
       {session && (
         <>
