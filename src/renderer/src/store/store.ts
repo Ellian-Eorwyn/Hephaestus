@@ -113,8 +113,25 @@ export const useStore = create<State>((set, get) => ({
   },
 
   setView: (v) => {
+    const prevId = get().activeHarnessId()
+    const nextId = v === 'dashboard' ? null : v.harnessId
     set({ view: v })
-    if (v !== 'dashboard') void get().loadProjects(v.harnessId)
+    // Switching to a different harness must clear the center/inspector selection,
+    // otherwise the previous harness's session/files stay on screen.
+    if (prevId !== nextId) {
+      set({
+        selectedSessionPath: null,
+        session: null,
+        selectedCwd: null,
+        fileTree: [],
+        selectedFile: null,
+        fileContent: null,
+        agentStatus: 'idle',
+        streamingText: '',
+        streamingThinking: ''
+      })
+    }
+    if (nextId) void get().loadProjects(nextId)
   },
 
   toggleTheme: () => {

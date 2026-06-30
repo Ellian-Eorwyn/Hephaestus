@@ -19,12 +19,23 @@ export function StatusBar(): JSX.Element {
   const pct = ctxWindow ? Math.min(100, (ctxUsed / ctxWindow) * 100) : 0
   const total = session?.usage.totalTokens ?? 0
 
+  // On the Dashboard there is no single active harness, so summarize all of them.
+  const allHealth = Object.values(backend)
+  const onlineCount = allHealth.filter((h) => h.online).length
+
   return (
     <footer className="statusbar">
-      <span>
-        <span className={`dot ${health?.online ? 'online' : 'offline'}`} />
-        {health ? (health.online ? 'BACKEND ONLINE' : 'BACKEND OFFLINE') : 'NO BACKEND'}
-      </span>
+      {harnessId ? (
+        <span>
+          <span className={`dot ${health?.online ? 'online' : 'offline'}`} />
+          {health ? (health.online ? 'BACKEND ONLINE' : 'BACKEND OFFLINE') : 'NO BACKEND'}
+        </span>
+      ) : (
+        <span>
+          <span className={`dot ${onlineCount > 0 ? 'online' : 'offline'}`} />
+          {onlineCount}/{allHealth.length || 0} HARNESSES ONLINE
+        </span>
+      )}
       {health?.online && health.models[0] && <span className="muted">{health.models[0]}</span>}
       {agentStatus === 'running' && <span className="copper">● RUNNING</span>}
       <span className="spacer" />
