@@ -199,13 +199,22 @@ export interface FileNode {
   children?: FileNode[]
 }
 
+export interface SheetData {
+  name: string
+  rows: string[][]
+  /** True when the sheet was clipped to a maximum row/column count. */
+  clipped?: boolean
+}
+
 export interface FileContent {
   path: string
-  /** 'markdown' | 'code' | 'binary' */
-  kind: 'markdown' | 'code' | 'binary'
-  /** inferred language id for code highlighting */
+  kind: 'markdown' | 'code' | 'binary' | 'spreadsheet'
+  /** inferred language id for code highlighting (code kind) */
   language?: string
+  /** text content (markdown / code kinds) */
   content: string
+  /** parsed sheets (spreadsheet kind) */
+  sheets?: SheetData[]
   truncated: boolean
 }
 

@@ -1,6 +1,7 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
-import type { FileNode, FileContent } from '@shared/types'
+import * as XLSX from 'xlsx'
+import type { FileNode, FileContent, SheetData } from '@shared/types'
 
 const IGNORE = new Set(['.git', 'node_modules', '.DS_Store', '.venv', 'venv', '__pycache__', 'dist', 'out', '.next'])
 
@@ -40,7 +41,11 @@ const CODE_LANGS: Record<string, string> = {
 }
 
 const MARKDOWN_EXT = new Set(['.md', '.markdown', '.mdx'])
-const MAX_BYTES = 1_000_000 // 1MB cap for preview
+const SPREADSHEET_EXT = new Set(['.csv', '.tsv', '.xlsx', '.xlsm', '.xls', '.ods'])
+const MAX_BYTES = 1_000_000 // 1MB cap for text preview
+const MAX_SHEET_BYTES = 15_000_000 // 15MB cap for spreadsheet parsing
+const MAX_ROWS = 1000
+const MAX_COLS = 60
 
 export class FileService {
   /** Build a (lazily shallow) file tree for the given cwd, 1 level recursive per dir. */
@@ -83,6 +88,14 @@ export class FileService {
     const stat = await fs.stat(filePath)
     const truncated = stat.size > MAX_BYTES
 
+    if (SPREADSHEET_EXT.has(ext)) {
+      if (stat.size > MAX_SHEET_BYTES) {
+        return { path: filePath, kind: 'binary', content: '', truncated: true }
+      }
+      const sheets = await this.readSpreadsheet(filePath)
+      return { path: filePath, kind: 'spreadsheet', content: '', sheets, truncated: false }
+    }
+
     if (MARKDOWN_EXT.has(ext)) {
       const content = await this.readText(filePath, truncated)
       return { path: filePath, kind: 'markdown', content, truncated }
@@ -92,6 +105,36 @@ export class FileService {
       return { path: filePath, kind: 'code', language: CODE_LANGS[ext] ?? 'text', content, truncated }
     }
     return { path: filePath, kind: 'binary', content: '', truncated: false }
+  }
+
+  /**
+   * Parse a spreadsheet (csv/tsv/xls/xlsx/ods) into one or more sheets of string
+   * cells via SheetJS. Each sheet is clipped to MAX_ROWS x MAX_COLS for preview.
+   */
+  private async readSpreadsheet(filePath: string): Promise<SheetData[]> {
+    const buf = await fs.readFile(filePath)
+    // SheetJS auto-detects the format (csv, tsv, xlsx, …) from the buffer.
+    const wb = XLSX.read(buf, { type: 'buffer', cellDates: true, dense: false })
+    const sheets: SheetData[] = []
+    for (const name of wb.SheetNames) {
+      const ws = wb.Sheets[name]
+      if (!ws) continue
+      // header:1 => array-of-arrays; defval keeps empty cells aligned.
+      const aoa = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1, defval: '', blankrows: false })
+      let clipped = false
+      const rows: string[][] = []
+      for (const row of aoa) {
+        if (rows.length >= MAX_ROWS) {
+          clipped = true
+          break
+        }
+        const cells = (row as unknown[]).slice(0, MAX_COLS).map((c) => cellToString(c))
+        if ((row as unknown[]).length > MAX_COLS) clipped = true
+        rows.push(cells)
+      }
+      sheets.push({ name, rows, clipped })
+    }
+    return sheets.length ? sheets : [{ name: 'Sheet1', rows: [] }]
   }
 
   private async readText(filePath: string, truncated: boolean): Promise<string> {
@@ -105,6 +148,12 @@ export class FileService {
       await handle.close()
     }
   }
+}
+
+function cellToString(c: unknown): string {
+  if (c == null) return ''
+  if (c instanceof Date) return c.toISOString().slice(0, 10)
+  return String(c)
 }
 
 function isProbablyText(filePath: string): boolean {

@@ -5,6 +5,7 @@ import {
   ChevronDown,
   FileText,
   FileCode,
+  FileSpreadsheet,
   File as FileIcon,
   Folder,
   FolderOpen,
@@ -14,6 +15,7 @@ import {
 import { useStore } from '../store/store'
 import { MarkdownView } from './MarkdownView'
 import { CodeView } from './CodeView'
+import { SpreadsheetView } from './SpreadsheetView'
 import type { FileNode } from '@shared/types'
 
 export function Inspector(): JSX.Element {
@@ -95,6 +97,7 @@ function TreeNode({ node, depth }: { node: FileNode; depth: number }): JSX.Eleme
 
 function FileGlyph({ name }: { name: string }): JSX.Element {
   if (/\.(md|markdown|mdx)$/i.test(name)) return <FileText size={14} className="muted" />
+  if (/\.(csv|tsv|xlsx|xlsm|xls|ods)$/i.test(name)) return <FileSpreadsheet size={14} className="muted" />
   if (/\.(ts|tsx|js|jsx|py|go|rs|java|c|cpp|cs|rb|sh|json|ya?ml|toml|css|html|sql)$/i.test(name))
     return <FileCode size={14} className="muted" />
   return <FileIcon size={14} className="muted" />
@@ -119,6 +122,8 @@ function Preview(): JSX.Element {
           </div>
         ) : fileContent.kind === 'markdown' ? (
           <MarkdownView source={fileContent.content} />
+        ) : fileContent.kind === 'spreadsheet' ? (
+          <SpreadsheetView sheets={fileContent.sheets ?? []} />
         ) : fileContent.kind === 'code' ? (
           <CodeView code={fileContent.content} language={fileContent.language} />
         ) : (

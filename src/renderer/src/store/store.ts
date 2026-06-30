@@ -15,6 +15,20 @@ const heph = window.heph
 
 type View = 'dashboard' | { harnessId: string }
 
+/** Stable key identifying a project within a harness (used for archiving). */
+export function projectKey(harnessId: string, encoded: string): string {
+  return `${harnessId}::${encoded}`
+}
+
+function loadArchived(): string[] {
+  try {
+    const raw = localStorage.getItem('heph.archived')
+    return raw ? (JSON.parse(raw) as string[]) : []
+  } catch {
+    return []
+  }
+}
+
 interface State {
   // top-level
   harnesses: HarnessConfig[]
@@ -27,6 +41,11 @@ interface State {
   projects: ProjectSummary[]
   expanded: Record<string, boolean> // encoded -> expanded
   selectedCwd: string | null
+
+  // archiving
+  archived: string[] // project keys (harnessId::encoded)
+  selectionMode: boolean
+  selectedForArchive: string[] // project keys checked in selection mode
 
   // center
   selectedSessionPath: string | null
@@ -59,6 +78,12 @@ interface State {
   activeHarnessId: () => string | null
   loadProjects: (harnessId: string) => Promise<void>
   toggleProject: (p: ProjectSummary) => void
+
+  // archiving
+  toggleSelectionMode: () => void
+  toggleForArchive: (key: string) => void
+  archiveSelected: () => void
+  unarchive: (key: string) => void
   selectSession: (harnessId: string, path: string, cwd: string) => Promise<void>
   selectFile: (path: string) => Promise<void>
   setAttachViewedFile: (on: boolean) => void
@@ -80,6 +105,10 @@ export const useStore = create<State>((set, get) => ({
   projects: [],
   expanded: {},
   selectedCwd: null,
+
+  archived: loadArchived(),
+  selectionMode: false,
+  selectedForArchive: [],
 
   selectedSessionPath: null,
   session: null,
@@ -120,7 +149,7 @@ export const useStore = create<State>((set, get) => ({
   setView: (v) => {
     const prevId = get().activeHarnessId()
     const nextId = v === 'dashboard' ? null : v.harnessId
-    set({ view: v })
+    set({ view: v, selectionMode: false, selectedForArchive: [] })
     // Switching to a different harness must clear the center/inspector selection,
     // otherwise the previous harness's session/files stay on screen.
     if (prevId !== nextId) {
@@ -171,6 +200,29 @@ export const useStore = create<State>((set, get) => ({
 
   toggleProject: (p) =>
     set((s) => ({ expanded: { ...s.expanded, [p.encoded]: !s.expanded[p.encoded] } })),
+
+  toggleSelectionMode: () =>
+    set((s) => ({ selectionMode: !s.selectionMode, selectedForArchive: [] })),
+
+  toggleForArchive: (key) =>
+    set((s) => ({
+      selectedForArchive: s.selectedForArchive.includes(key)
+        ? s.selectedForArchive.filter((k) => k !== key)
+        : [...s.selectedForArchive, key]
+    })),
+
+  archiveSelected: () => {
+    const { archived, selectedForArchive } = get()
+    const next = Array.from(new Set([...archived, ...selectedForArchive]))
+    localStorage.setItem('heph.archived', JSON.stringify(next))
+    set({ archived: next, selectionMode: false, selectedForArchive: [] })
+  },
+
+  unarchive: (key) => {
+    const next = get().archived.filter((k) => k !== key)
+    localStorage.setItem('heph.archived', JSON.stringify(next))
+    set({ archived: next })
+  },
 
   selectSession: async (harnessId, path, cwd) => {
     set({ selectedSessionPath: path, selectedCwd: cwd, loadingSession: true, streamingText: '' })
