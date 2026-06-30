@@ -29,6 +29,21 @@ function loadArchived(): string[] {
   }
 }
 
+function loadSettings() {
+  try {
+    const raw = localStorage.getItem('heph.settings')
+    if (raw) return JSON.parse(raw)
+  } catch {
+    // ignore
+  }
+  return {
+    messageSpacing: 'compact',
+    showThinking: true,
+    showTools: true,
+    showToolResults: true
+  }
+}
+
 interface State {
   // top-level
   harnesses: HarnessConfig[]
@@ -73,21 +88,43 @@ interface State {
   toggleTheme: () => void
   toggleZen: () => void
   setAddModal: (open: boolean) => void
+
+  // settings
+  settingsModalOpen: boolean
+  messageSpacing: 'compact' | 'cozy' | 'comfortable'
+  showThinking: boolean
+  showTools: boolean
+  showToolResults: boolean
+  setSettingsModalOpen: (open: boolean) => void
+  updateSettings: (
+    updates: Partial<{
+      messageSpacing: 'compact' | 'cozy' | 'comfortable'
+      showThinking: boolean
+      showTools: boolean
+      showToolResults: boolean
+    }>
+  ) => void
+
   addHarness: (input: { label: string; agentDir: string }) => Promise<void>
 
   activeHarnessId: () => string | null
   loadProjects: (harnessId: string) => Promise<void>
   toggleProject: (p: ProjectSummary) => void
+  selectProject: (cwd: string) => Promise<void>
+  startNewChat: (cwd: string) => Promise<void>
 
   // archiving
   toggleSelectionMode: () => void
   toggleForArchive: (key: string) => void
   archiveSelected: () => void
   unarchive: (key: string) => void
+  deleteProject: (encoded: string) => Promise<void>
   selectSession: (harnessId: string, path: string, cwd: string) => Promise<void>
   selectFile: (path: string) => Promise<void>
   setAttachViewedFile: (on: boolean) => void
   refreshBackend: (harnessId: string) => Promise<void>
+  addProject: (cwd: string) => Promise<void>
+  browseAndAddProject: () => Promise<void>
 
   sendPrompt: (text: string) => Promise<void>
   abort: () => Promise<void>
@@ -95,14 +132,23 @@ interface State {
   applyAgentEvent: (e: AgentEvent) => void
 }
 
-export const useStore = create<State>((set, get) => ({
-  harnesses: [],
-  view: 'dashboard',
-  theme: (localStorage.getItem('heph.theme') as 'dark' | 'light') ?? 'dark',
-  zen: false,
-  addModalOpen: false,
+export const useStore = create<State>((set, get) => {
+  const settings = loadSettings()
+  
+  return {
+    harnesses: [],
+    view: 'dashboard',
+    theme: (localStorage.getItem('heph.theme') as 'dark' | 'light') ?? 'dark',
+    zen: false,
+    addModalOpen: false,
 
-  projects: [],
+    settingsModalOpen: false,
+    messageSpacing: settings.messageSpacing || 'compact',
+    showThinking: settings.showThinking ?? true,
+    showTools: settings.showTools ?? true,
+    showToolResults: settings.showToolResults ?? true,
+
+    projects: [],
   expanded: {},
   selectedCwd: null,
 
@@ -135,6 +181,11 @@ export const useStore = create<State>((set, get) => ({
       void get().applySessionUpdate(path)
     })
     heph.onAgentEvent((e) => get().applyAgentEvent(e))
+    heph.onProjectChanged((cwd) => {
+      if (get().selectedCwd === cwd) {
+        heph.listFiles(cwd).then((fileTree) => set({ fileTree })).catch(() => {})
+      }
+    })
 
     // Kick a backend check per harness (best-effort).
     for (const h of harnesses) void get().refreshBackend(h.id)
@@ -178,6 +229,20 @@ export const useStore = create<State>((set, get) => ({
   toggleZen: () => set({ zen: !get().zen }),
   setAddModal: (open) => set({ addModalOpen: open }),
 
+  setSettingsModalOpen: (open) => set({ settingsModalOpen: open }),
+  updateSettings: (updates) => {
+    set((s) => {
+      const next = {
+        messageSpacing: updates.messageSpacing ?? s.messageSpacing,
+        showThinking: updates.showThinking ?? s.showThinking,
+        showTools: updates.showTools ?? s.showTools,
+        showToolResults: updates.showToolResults ?? s.showToolResults
+      }
+      localStorage.setItem('heph.settings', JSON.stringify(next))
+      return next
+    })
+  },
+
   addHarness: async (input) => {
     const harnesses = await heph.addHarness(input)
     set({ harnesses, addModalOpen: false })
@@ -200,6 +265,42 @@ export const useStore = create<State>((set, get) => ({
 
   toggleProject: (p) =>
     set((s) => ({ expanded: { ...s.expanded, [p.encoded]: !s.expanded[p.encoded] } })),
+
+  selectProject: async (cwd) => {
+    set({
+      selectedCwd: cwd,
+      selectedSessionPath: null,
+      session: null,
+      streamingText: '',
+      streamingThinking: '',
+      agentStatus: 'idle'
+    })
+    try {
+      void heph.watchProject(cwd)
+      const fileTree = await heph.listFiles(cwd)
+      set({ fileTree, selectedFile: null, fileContent: null })
+    } catch {
+      set({ fileTree: [], selectedFile: null, fileContent: null })
+    }
+  },
+
+  startNewChat: async (cwd) => {
+    set({
+      selectedCwd: cwd,
+      selectedSessionPath: null,
+      session: null,
+      streamingText: '',
+      streamingThinking: '',
+      agentStatus: 'idle'
+    })
+    try {
+      void heph.watchProject(cwd)
+      const fileTree = await heph.listFiles(cwd)
+      set({ fileTree, selectedFile: null, fileContent: null })
+    } catch {
+      set({ fileTree: [], selectedFile: null, fileContent: null })
+    }
+  },
 
   toggleSelectionMode: () =>
     set((s) => ({ selectionMode: !s.selectionMode, selectedForArchive: [] })),
@@ -224,12 +325,26 @@ export const useStore = create<State>((set, get) => ({
     set({ archived: next })
   },
 
+  deleteProject: async (encoded) => {
+    const harnessId = get().activeHarnessId()
+    if (!harnessId) return
+    await heph.removeProject({ harnessId, encoded })
+    // Clean up archived list for this project
+    const key = projectKey(harnessId, encoded)
+    const nextArchived = get().archived.filter((k) => k !== key)
+    localStorage.setItem('heph.archived', JSON.stringify(nextArchived))
+    // Refresh the project list
+    const projects = await heph.listProjects(harnessId)
+    set({ projects, archived: nextArchived })
+  },
+
   selectSession: async (harnessId, path, cwd) => {
     set({ selectedSessionPath: path, selectedCwd: cwd, loadingSession: true, streamingText: '' })
     const session = await heph.loadSession(harnessId, path)
     set({ session, loadingSession: false })
     // Load the file tree for this project's cwd.
     try {
+      void heph.watchProject(cwd)
       const fileTree = await heph.listFiles(cwd)
       set({ fileTree, selectedFile: null, fileContent: null })
     } catch {
@@ -259,6 +374,19 @@ export const useStore = create<State>((set, get) => ({
     }
   },
 
+  addProject: async (cwd) => {
+    const harnessId = get().activeHarnessId()
+    if (!harnessId) return
+    const projects = await heph.addProject({ harnessId, cwd })
+    set({ projects })
+  },
+
+  browseAndAddProject: async () => {
+    const folder = await heph.browseFolder()
+    if (!folder) return
+    await get().addProject(folder)
+  },
+
   sendPrompt: async (text) => {
     const harnessId = get().activeHarnessId()
     const cwd = get().selectedCwd
@@ -277,14 +405,24 @@ export const useStore = create<State>((set, get) => ({
       text,
       attachedFile: attach ? (file as string) : undefined
     }
-    set((s) => ({
-      session: s.session
-        ? { ...s.session, messages: [...s.session.messages, userMsg] }
-        : s.session,
-      agentStatus: 'running',
-      streamingText: '',
-      streamingThinking: ''
-    }))
+    set((s) => {
+      const fakeSession: SessionDetail = {
+        path: '',
+        header: { type: 'session', id: 'new', timestamp: new Date().toISOString(), cwd },
+        messages: [userMsg],
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: 0 },
+        contextWindow: null,
+        currentContextTokens: 0
+      }
+      return {
+        session: s.session
+          ? { ...s.session, messages: [...s.session.messages, userMsg] }
+          : fakeSession,
+        agentStatus: 'running',
+        streamingText: '',
+        streamingThinking: ''
+      }
+    })
     const open = await heph.agentOpen({ harnessId, cwd, sessionPath: get().selectedSessionPath ?? undefined })
     if (!open.ok) {
       set({ agentStatus: 'idle' })
@@ -312,9 +450,21 @@ export const useStore = create<State>((set, get) => ({
   },
 
   applySessionUpdate: async (path) => {
-    const { selectedSessionPath, view } = get()
-    if (path !== selectedSessionPath) return
+    const { selectedSessionPath, view, selectedCwd } = get()
     if (view === 'dashboard') return
+
+    // Re-fetch project list so the sidebar shows the new session
+    void get().loadProjects(view.harnessId)
+
+    if (selectedSessionPath === null) {
+      const session = await heph.loadSession(view.harnessId, path)
+      if (session.header.cwd === selectedCwd) {
+        set({ session, selectedSessionPath: path })
+      }
+      return
+    }
+
+    if (path !== selectedSessionPath) return
     const session = await heph.loadSession(view.harnessId, path)
     set({ session })
   },
@@ -331,4 +481,5 @@ export const useStore = create<State>((set, get) => ({
       set({ agentStatus: 'idle', streamingText: '', streamingThinking: '' })
     }
   }
-}))
+  }
+})

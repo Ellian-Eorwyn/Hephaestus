@@ -11,13 +11,15 @@ export function Forge(): JSX.Element {
   const streamingThinking = useStore((s) => s.streamingThinking)
   const agentStatus = useStore((s) => s.agentStatus)
   const selectedSessionPath = useStore((s) => s.selectedSessionPath)
+  const selectedCwd = useStore((s) => s.selectedCwd)
+  const messageSpacing = useStore((s) => s.messageSpacing)
   const bottomRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [session?.messages.length, streamingText])
 
-  if (!selectedSessionPath) {
+  if (!selectedSessionPath && !selectedCwd) {
     return (
       <div className="pane forge">
         <div className="empty">
@@ -27,6 +29,27 @@ export function Forge(): JSX.Element {
             <p>Select a conversation from a project, or start a new one.</p>
           </div>
         </div>
+      </div>
+    )
+  }
+
+  if (!selectedSessionPath && selectedCwd) {
+    return (
+      <div className="pane forge">
+        <div className="pane-header">
+          <Hammer size={14} className="copper" />
+          <span className="label-tech">Forge — New Session</span>
+        </div>
+        <div className="pane-body">
+          <div className="empty">
+            <div>
+              <Flame className="glyph" />
+              <h2>Ready to forge</h2>
+              <p>Type a prompt below to start a new conversation in this project.</p>
+            </div>
+          </div>
+        </div>
+        <Composer />
       </div>
     )
   }
@@ -43,7 +66,7 @@ export function Forge(): JSX.Element {
             <span className="muted">Loading session…</span>
           </div>
         ) : (
-          <div className="thread">
+          <div className={`thread spacing-${messageSpacing}`}>
             {session?.messages.map((m) => (
               <Message key={m.id} m={m} />
             ))}
@@ -74,6 +97,10 @@ export function Forge(): JSX.Element {
 }
 
 function Message({ m }: { m: ThreadMessage }): JSX.Element | null {
+  const showThinking = useStore((s) => s.showThinking)
+  const showTools = useStore((s) => s.showTools)
+  const showToolResults = useStore((s) => s.showToolResults)
+
   if (m.role === 'user') {
     return (
       <div className="msg user">
@@ -99,6 +126,7 @@ function Message({ m }: { m: ThreadMessage }): JSX.Element | null {
     )
   }
   if (m.role === 'toolResult') {
+    if (!showToolResults) return null
     return (
       <details className={`toolblock ${m.toolResult?.isError ? 'err' : ''}`}>
         <summary>
@@ -117,14 +145,14 @@ function Message({ m }: { m: ThreadMessage }): JSX.Element | null {
         <Hammer size={15} />
       </div>
       <div className="body">
-        {m.thinking && (
+        {m.thinking && showThinking && (
           <details className="thinking">
             <summary>✦ thinking</summary>
             <div className="content">{m.thinking}</div>
           </details>
         )}
         {m.text && <MarkdownView source={m.text} />}
-        {m.toolCalls?.map((tc) => (
+        {m.toolCalls && showTools && m.toolCalls.map((tc) => (
           <details className="toolblock" key={tc.id}>
             <summary>⚙ {tc.name}</summary>
             <div className="content">

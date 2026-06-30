@@ -241,6 +241,7 @@ button:focus-visible {
   flex-direction: column;
   min-height: 0;
   min-width: 0;
+  position: relative;
 }
 
 .pane-header {
@@ -354,6 +355,36 @@ button:focus-visible {
   background: var(--bg-1);
 }
 
+.project-row.selected {
+  background: var(--bg-3);
+  box-shadow: inset 2px 0 0 var(--copper);
+}
+
+.project-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.new-chat-btn {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+  color: var(--text-faint);
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.project-row:hover .new-chat-btn {
+  opacity: 1;
+}
+.new-chat-btn:hover {
+  color: var(--copper-bright);
+  background: var(--bg-1);
+}
+
 .select-bar {
   display: flex;
   align-items: center;
@@ -411,6 +442,28 @@ button:focus-visible {
   color: #1a1614;
 }
 
+/* Drop-zone overlay for drag-and-drop project adding */
+.drop-zone-overlay {
+  position: absolute;
+  inset: 40px 0 0 0; /* below the pane-header */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  background: rgba(204, 85, 51, 0.08);
+  border: 2px dashed var(--copper);
+  border-radius: 8px;
+  margin: 6px;
+  z-index: 10;
+  pointer-events: none;
+  color: var(--copper-bright);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+
 /* ============================ Forge (center) ============================ */
 
 .forge {
@@ -420,8 +473,10 @@ button:focus-visible {
   padding: 22px 28px 8px;
   display: flex;
   flex-direction: column;
-  gap: 22px;
 }
+.thread.spacing-compact { gap: 12px; }
+.thread.spacing-cozy { gap: 20px; }
+.thread.spacing-comfortable { gap: 32px; }
 .msg {
   display: flex;
   gap: 14px;
@@ -472,8 +527,19 @@ button:focus-visible {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--bg-1);
-  margin: 8px 0;
   overflow: hidden;
+}
+.thread.spacing-compact .thinking,
+.thread.spacing-compact .toolblock {
+  margin: 4px 0;
+}
+.thread.spacing-cozy .thinking,
+.thread.spacing-cozy .toolblock {
+  margin: 8px 0;
+}
+.thread.spacing-comfortable .thinking,
+.thread.spacing-comfortable .toolblock {
+  margin: 12px 0;
 }
 .thinking summary,
 .toolblock summary {

@@ -65,7 +65,6 @@ export class SessionStore {
       } catch {
         continue
       }
-      if (files.length === 0) continue
 
       const sessions: SessionSummary[] = []
       let headerCwd = ''
@@ -80,9 +79,19 @@ export class SessionStore {
       }
       sessions.sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1))
 
-      // Prefer the authoritative cwd from the session header; the folder name is
-      // a lossy encoding (real hyphens are indistinguishable from separators).
-      const cwd = headerCwd || decodeCwd(encoded)
+      // Prefer the authoritative cwd from the session header; fall back to a
+      // .project.json metadata file (written when users add projects via the UI);
+      // last resort is the lossy decodeCwd from the folder name.
+      let cwd = headerCwd
+      if (!cwd) {
+        try {
+          const meta = JSON.parse(await fs.readFile(path.join(dir, '.project.json'), 'utf8'))
+          if (meta.cwd) cwd = meta.cwd
+        } catch {
+          // no metadata file
+        }
+      }
+      if (!cwd) cwd = decodeCwd(encoded)
       projects.push({
         cwd,
         name: path.basename(cwd) || cwd,

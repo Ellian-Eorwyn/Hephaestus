@@ -13,6 +13,11 @@ const api: HephApi = {
 
   listFiles: (cwd) => ipcRenderer.invoke(IPC.listFiles, cwd),
   readFile: (path) => ipcRenderer.invoke(IPC.readFile, path),
+  watchProject: (cwd) => ipcRenderer.invoke(IPC.watchProject, cwd),
+
+  browseFolder: () => ipcRenderer.invoke(IPC.browseFolder),
+  addProject: (input) => ipcRenderer.invoke(IPC.addProject, input),
+  removeProject: (input) => ipcRenderer.invoke(IPC.removeProject, input),
 
   checkBackend: (harnessId) => ipcRenderer.invoke(IPC.checkBackend, harnessId),
 
@@ -30,6 +35,11 @@ const api: HephApi = {
     const listener = (_e: unknown, event: AgentEvent) => cb(event)
     ipcRenderer.on(IPC.evtAgentEvent, listener)
     return () => ipcRenderer.removeListener(IPC.evtAgentEvent, listener)
+  },
+  onProjectChanged: (cb) => {
+    const listener = (_e: unknown, cwd: string) => cb(cwd)
+    ipcRenderer.on(IPC.evtProjectChanged, listener)
+    return () => ipcRenderer.removeListener(IPC.evtProjectChanged, listener)
   }
 }
 

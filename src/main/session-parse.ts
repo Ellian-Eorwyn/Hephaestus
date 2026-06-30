@@ -30,6 +30,19 @@ export function decodeCwd(encoded: string): string {
   return '/' + s.split('-').join('/')
 }
 
+/**
+ * Encode a working directory path into the folder name format used under
+ * `sessions/`. This is the inverse of `decodeCwd`: strip leading `/`,
+ * replace `/` with `-`, wrap in `--…--`.
+ */
+export function encodeCwd(cwd: string): string {
+  // Normalise: resolve trailing slashes, collapse double slashes.
+  const normalised = path.resolve(cwd)
+  // Strip the leading `/`, replace remaining `/` with `-`, wrap in `--…--`.
+  const inner = normalised.replace(/^\//, '').replace(/\//g, '-')
+  return `--${inner}--`
+}
+
 /** Parse a .jsonl session file into raw records. Tolerant of malformed lines. */
 export async function readRecords(filePath: string): Promise<SessionRecord[]> {
   const raw = await fs.readFile(filePath, 'utf8')

@@ -3,7 +3,19 @@ import path from 'node:path'
 import * as XLSX from 'xlsx'
 import type { FileNode, FileContent, SheetData } from '@shared/types'
 
+import chokidar from 'chokidar'
+
 const IGNORE = new Set(['.git', 'node_modules', '.DS_Store', '.venv', 'venv', '__pycache__', 'dist', 'out', '.next'])
+const IGNORE_PATTERNS = [
+  /(^|[\/\\])\.[^\/\\]/, // ignore dotfiles (except we want to allow some, but chokidar is noisy. Actually let's just use string globs for the main ones)
+  '**/node_modules/**',
+  '**/.venv/**',
+  '**/venv/**',
+  '**/__pycache__/**',
+  '**/dist/**',
+  '**/out/**',
+  '**/.next/**'
+]
 
 const CODE_LANGS: Record<string, string> = {
   '.ts': 'typescript',
@@ -48,9 +60,38 @@ const MAX_ROWS = 1000
 const MAX_COLS = 60
 
 export class FileService {
+  private watcher: chokidar.FSWatcher | null = null
+
   /** Build a (lazily shallow) file tree for the given cwd, 1 level recursive per dir. */
   async listFiles(cwd: string): Promise<FileNode[]> {
     return this.readDir(cwd, 4)
+  }
+
+  watch(cwd: string, onChange: () => void): void {
+    if (this.watcher) {
+      void this.watcher.close()
+    }
+    
+    let timeout: NodeJS.Timeout | null = null
+    const notify = () => {
+      if (timeout) clearTimeout(timeout)
+      timeout = setTimeout(() => { onChange() }, 200)
+    }
+
+    this.watcher = chokidar.watch(cwd, {
+      ignored: IGNORE_PATTERNS,
+      ignoreInitial: true,
+      depth: 4
+    })
+    
+    this.watcher.on('all', notify)
+  }
+
+  dispose(): void {
+    if (this.watcher) {
+      void this.watcher.close()
+      this.watcher = null
+    }
   }
 
   private async readDir(dir: string, depth: number): Promise<FileNode[]> {

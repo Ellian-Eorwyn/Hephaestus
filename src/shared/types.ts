@@ -265,6 +265,11 @@ export interface HephApi {
 
   listFiles(cwd: string): Promise<FileNode[]>
   readFile(path: string): Promise<FileContent>
+  watchProject(cwd: string): Promise<void>
+
+  browseFolder(): Promise<string | null>
+  addProject(input: { harnessId: string; cwd: string }): Promise<ProjectSummary[]>
+  removeProject(input: { harnessId: string; encoded: string }): Promise<void>
 
   checkBackend(harnessId: string): Promise<BackendHealth>
 
@@ -277,6 +282,7 @@ export interface HephApi {
   // Subscriptions (return an unsubscribe fn)
   onSessionUpdated(cb: (payload: { harnessId: string; path: string }) => void): () => void
   onAgentEvent(cb: (event: AgentEvent) => void): () => void
+  onProjectChanged(cb: (cwd: string) => void): () => void
 }
 
 declare global {

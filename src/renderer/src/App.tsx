@@ -8,6 +8,7 @@ import { Forge } from './components/Forge'
 import { Inspector } from './components/Inspector'
 import { Dashboard } from './components/Dashboard'
 import { AddHarnessModal } from './components/AddHarnessModal'
+import { SettingsModal } from './components/SettingsModal'
 
 export function App(): JSX.Element {
   const init = useStore((s) => s.init)
@@ -47,6 +48,7 @@ export function App(): JSX.Element {
       </div>
       <StatusBar />
       {addModalOpen && <AddHarnessModal />}
+      <SettingsModal />
     </div>
   )
 }

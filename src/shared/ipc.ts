@@ -11,6 +11,11 @@ export const IPC = {
 
   listFiles: 'file:list',
   readFile: 'file:read',
+  watchProject: 'file:watch',
+
+  browseFolder: 'dialog:browseFolder',
+  addProject: 'session:addProject',
+  removeProject: 'session:removeProject',
 
   checkBackend: 'backend:check',
 
@@ -21,5 +26,6 @@ export const IPC = {
 
   // main -> renderer events
   evtSessionUpdated: 'evt:sessionUpdated',
-  evtAgentEvent: 'evt:agentEvent'
+  evtAgentEvent: 'evt:agentEvent',
+  evtProjectChanged: 'evt:projectChanged'
 } as const

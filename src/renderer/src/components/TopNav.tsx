@@ -42,7 +42,7 @@ export function TopNav(): JSX.Element {
         <button className="icon-btn" title="Toggle theme" onClick={toggleTheme}>
           {theme === 'dark' ? <Sun size={17} /> : <Moon size={17} />}
         </button>
-        <button className="icon-btn" title="Settings">
+        <button className="icon-btn" title="Settings" onClick={() => useStore.getState().setSettingsModalOpen(true)}>
           <Settings size={17} />
         </button>
       </div>
