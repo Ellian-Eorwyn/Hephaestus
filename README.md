@@ -2,6 +2,8 @@
 
 Hephaestus is a desktop GUI for managing and monitoring local LLM agents across multiple pi harness environments. Instead of interacting with your agents solely through the command line or log files, Hephaestus reads your existing workspace structure and provides a centralized interface for agent interaction and process monitoring.
 
+![Hephaestus Dashboard](assets/screenshot.png)
+
 It is built to integrate natively with [Ellian-Eorwyn/pi-forge](https://github.com/Ellian-Eorwyn/pi-forge), but is entirely agnostic and can be used with any custom pi harness setup.
 
 ## Features
@@ -15,22 +17,13 @@ It is built to integrate natively with [Ellian-Eorwyn/pi-forge](https://github.c
 
 ## Installation
 
-You can install Hephaestus using the command line installer scripts.
+You can download the pre-compiled binaries directly from the [Releases page](https://github.com/Ellian-Eorwyn/Hephaestus/releases).
 
-### macOS & Linux
-Run the following command in your terminal:
+- **Windows:** Download the `.exe` installer.
+- **macOS:** Download the `.dmg` file.
+- **Linux:** Download the `.AppImage`.
 
-```bash
-curl -sSL https://raw.githubusercontent.com/Ellian-Eorwyn/Hephaestus/main/install.sh | bash
-```
-
-### Windows
-Open PowerShell and run:
-
-```powershell
-Invoke-WebRequest -Uri https://raw.githubusercontent.com/Ellian-Eorwyn/Hephaestus/main/install.ps1 -UseBasicParsing | Invoke-Expression
-```
-*(Shorthand: `iwr https://raw.githubusercontent.com/Ellian-Eorwyn/Hephaestus/main/install.ps1 -useb | iex`)*
+Simply download the appropriate file for your operating system and run it to install Hephaestus.
 
 ## Setup & Usage
 
