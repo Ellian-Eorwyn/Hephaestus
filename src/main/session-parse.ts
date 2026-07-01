@@ -23,7 +23,7 @@ export function decodeCwd(encoded: string): string {
   let s = encoded
   if (s.startsWith('--')) s = s.slice(2)
   if (s.endsWith('--')) s = s.slice(0, -2)
-  // `--Users-ellie--` -> `Users-ellie` -> `/Users/ellie`
+  // `--Users-username--` -> `Users-username` -> `/Users/username`
   // Segments that were originally separated by `/` are now separated by `-`.
   // We cannot distinguish them from in-name hyphens, so reconstruct a plausible
   // POSIX path and let downstream existence checks confirm.
