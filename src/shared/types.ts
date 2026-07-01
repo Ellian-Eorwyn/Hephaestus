@@ -229,7 +229,14 @@ export interface FileContent {
 export interface BackendHealth {
   harnessId: string
   baseUrl: string
+  /** Kept for back-compat; equals `status === 'online'`. */
   online: boolean
+  /**
+   * 'online'  — a local baseUrl was reachable.
+   * 'offline' — a baseUrl is configured but unreachable.
+   * 'ready'   — no local baseUrl (hosted/login harness like base pi); not an error.
+   */
+  status: 'online' | 'offline' | 'ready'
   models: string[]
   error?: string
   checkedAt: string
@@ -288,6 +295,29 @@ export interface RunSnapshot {
 }
 
 // ---------------------------------------------------------------------------
+// Harness installer (one-click presets)
+// ---------------------------------------------------------------------------
+
+export interface HarnessPresetStatus {
+  preset: import('./harness-presets').HarnessPreset
+  /** Install root / agent dir already exists on disk (or the global CLI resolves). */
+  installed: boolean
+  /** A harness pointing at this preset's agent dir is registered in the app. */
+  registered: boolean
+}
+
+export interface InstallEvent {
+  presetId: string
+  type: 'stdout' | 'stderr' | 'done' | 'error'
+  /** A streamed output line (for 'stdout' | 'stderr'). */
+  line?: string
+  /** Process exit code (for 'done' | 'error'). */
+  code?: number | null
+  /** Failure reason (for 'error'). */
+  reason?: string
+}
+
+// ---------------------------------------------------------------------------
 // IPC channel contract (exposed via window.heph)
 // ---------------------------------------------------------------------------
 
@@ -298,6 +328,13 @@ export interface HephApi {
   listHarnesses(): Promise<HarnessConfig[]>
   addHarness(input: { label: string; agentDir: string }): Promise<HarnessConfig[]>
   removeHarness(id: string): Promise<HarnessConfig[]>
+
+  // One-click harness installers
+  getHarnessPresets(): Promise<HarnessPresetStatus[]>
+  installHarness(input: {
+    presetId: string
+    mode: 'install' | 'update'
+  }): Promise<{ ok: boolean; harnesses?: HarnessConfig[]; harnessId?: string; reason?: string }>
 
   listProjects(harnessId: string): Promise<ProjectSummary[]>
   loadSession(harnessId: string, path: string): Promise<SessionDetail>
@@ -329,6 +366,7 @@ export interface HephApi {
   onSessionUpdated(cb: (payload: { harnessId: string; path: string }) => void): () => void
   onAgentEvent(cb: (event: AgentEvent) => void): () => void
   onProjectChanged(cb: (cwd: string) => void): () => void
+  onInstallProgress(cb: (event: InstallEvent) => void): () => void
 }
 
 declare global {

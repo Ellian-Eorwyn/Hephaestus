@@ -3,6 +3,7 @@ import readline from 'node:readline'
 import path from 'node:path'
 import { existsSync } from 'node:fs'
 import type { AgentEvent, HarnessConfig, RunSnapshot, RunStatus } from '@shared/types'
+import { augmentedPath } from './paths'
 
 /**
  * Drives a harness's runtime in headless RPC mode. We spawn
@@ -46,15 +47,21 @@ export class AgentDriver {
     const args = ['--mode', 'rpc']
     if (sessionPath) args.push('--session', sessionPath)
 
-    // The launcher is an executable bash script that sets up env and execs the
-    // bundled cli.js, so spawn it directly. We prepend common node locations to
-    // PATH because a GUI-launched Electron app may not inherit the user's shell
-    // PATH (the launcher does `exec node …`).
+    // The launcher is either a harness-local bash script (Forge/Vault) that sets
+    // up its own env and execs the bundled cli.js, or a global binary like `pi`.
+    // Either way we prepend common node locations to PATH because a GUI-launched
+    // Electron app may not inherit the user's shell PATH. A global binary doesn't
+    // set the harness's agent dir, so we inject `<NAME>_CODING_AGENT_DIR`
+    // ourselves (harmless for base pi where it equals the default).
     let child: ChildProcessWithoutNullStreams
     try {
       child = spawn(harness.cli, args, {
         cwd,
-        env: { ...process.env, PATH: augmentedPath(process.env.PATH) },
+        env: {
+          ...process.env,
+          ...agentDirEnv(harness),
+          PATH: augmentedPath(process.env.PATH)
+        },
         stdio: ['pipe', 'pipe', 'pipe']
       })
     } catch (err) {
@@ -384,12 +391,21 @@ export function samePath(a: string, b: string): boolean {
   }
 }
 
-/** Ensure common node install locations are on PATH for the spawned launcher. */
-function augmentedPath(current: string | undefined): string {
-  const extra = ['/usr/local/bin', '/opt/homebrew/bin', `${process.env.HOME}/.hermes/node/bin`]
-  const parts = (current ?? '').split(':').filter(Boolean)
-  for (const p of extra) if (!parts.includes(p)) parts.push(p)
-  return parts.join(':')
+/**
+ * When the resolved launcher is a global binary (lives outside the harness
+ * root, e.g. `~/.hermes/node/bin/pi` for a `~/.pi` harness) it won't set the
+ * harness's agent dir, so it would default to `~/.pi/agent` regardless. Inject
+ * `<NAME>_CODING_AGENT_DIR` matching pi's own `ENV_AGENT_DIR` convention. A
+ * harness-local `bin/` wrapper sets this itself, so we skip it there.
+ */
+function agentDirEnv(harness: HarnessConfig): Record<string, string> {
+  if (!harness.cli) return {}
+  const harnessRoot = path.dirname(harness.agentDir)
+  if (harness.cli.startsWith(harnessRoot + path.sep)) return {}
+  const name = path.basename(harnessRoot).replace(/^\./, '')
+  if (!name) return {}
+  const key = `${name.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_CODING_AGENT_DIR`
+  return { [key]: harness.agentDir }
 }
 
 /**

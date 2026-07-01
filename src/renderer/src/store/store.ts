@@ -9,7 +9,8 @@ import type {
   AgentEvent,
   RunStatus,
   RunSnapshot,
-  ThreadMessage
+  ThreadMessage,
+  HarnessPresetStatus
 } from '@shared/types'
 import { wrapWithViewingContext } from '@shared/viewing-context'
 
@@ -36,6 +37,12 @@ export interface RunState {
 const ACTIVE: RunStatus[] = ['starting', 'running', 'finalizing']
 export function isActive(status: RunStatus): boolean {
   return ACTIVE.includes(status)
+}
+
+/** Renderer-side state for a one-click harness install/update in progress. */
+export interface InstallLog {
+  status: 'idle' | 'running' | 'done' | 'error'
+  lines: string[]
 }
 
 /**
@@ -160,6 +167,10 @@ interface State {
   // status
   backend: Record<string, BackendHealth>
 
+  // one-click installers
+  harnessPresets: HarnessPresetStatus[]
+  installLogs: Record<string, InstallLog>
+
   // actions
   init: () => Promise<void>
   setView: (v: View) => void
@@ -191,6 +202,8 @@ interface State {
 
   addHarness: (input: { label: string; agentDir: string }) => Promise<void>
   removeHarness: (id: string) => Promise<void>
+  loadHarnessPresets: () => Promise<void>
+  installHarness: (presetId: string, mode: 'install' | 'update') => Promise<void>
 
   activeHarnessId: () => string | null
   loadProjects: (harnessId: string) => Promise<void>
@@ -260,6 +273,8 @@ export const useStore = create<State>((set, get) => {
   attachViewedFile: settings.autoAttachFile ?? true,
 
   backend: {},
+  harnessPresets: [],
+  installLogs: {},
 
   init: async () => {
     document.documentElement.setAttribute('data-theme', get().theme)
@@ -277,6 +292,27 @@ export const useStore = create<State>((set, get) => {
         heph.listFiles(cwd).then((fileTree) => set({ fileTree })).catch(() => {})
       }
     })
+
+    // Stream one-click install output into per-preset logs.
+    heph.onInstallProgress((e) => {
+      set((s) => {
+        const prev = s.installLogs[e.presetId] ?? { status: 'idle', lines: [] }
+        const next: InstallLog = { ...prev }
+        if (e.type === 'stdout' || e.type === 'stderr') {
+          next.status = 'running'
+          next.lines = [...prev.lines, e.line ?? '']
+        } else if (e.type === 'done') {
+          next.status = 'done'
+        } else if (e.type === 'error') {
+          next.status = 'error'
+          if (e.reason) next.lines = [...prev.lines, e.reason]
+        }
+        return { installLogs: { ...s.installLogs, [e.presetId]: next } }
+      })
+    })
+
+    // Load installer presets (best-effort; powers the Add Harness modal).
+    void get().loadHarnessPresets()
 
     // Reconnect to any in-flight runs now (survives renderer reloads) and again
     // whenever the window regains focus, so a stale/disconnected UI self-heals
@@ -362,6 +398,42 @@ export const useStore = create<State>((set, get) => {
       get().setView({ harnessId: added.id })
       void get().refreshBackend(added.id)
     }
+  },
+
+  loadHarnessPresets: async () => {
+    try {
+      const harnessPresets = await heph.getHarnessPresets()
+      set({ harnessPresets })
+    } catch {
+      // ignore — installer UI just won't show presets
+    }
+  },
+
+  installHarness: async (presetId, mode) => {
+    // Reset the log and mark running; progress streams in via onInstallProgress.
+    set((s) => ({ installLogs: { ...s.installLogs, [presetId]: { status: 'running', lines: [] } } }))
+    let res: Awaited<ReturnType<typeof heph.installHarness>>
+    try {
+      res = await heph.installHarness({ presetId, mode })
+    } catch (err) {
+      set((s) => ({
+        installLogs: {
+          ...s.installLogs,
+          [presetId]: {
+            status: 'error',
+            lines: [...(s.installLogs[presetId]?.lines ?? []), err instanceof Error ? err.message : 'install failed']
+          }
+        }
+      }))
+      return
+    }
+    if (res.ok && res.harnesses) {
+      set({ harnesses: res.harnesses })
+      if (res.harnessId) void get().refreshBackend(res.harnessId)
+    }
+    // Refresh installed/registered status for all cards.
+    await get().loadHarnessPresets()
+    // The streamed 'done'/'error' event already set the final log status.
   },
 
   removeHarness: async (id) => {

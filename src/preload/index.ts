@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { IPC } from '@shared/ipc'
-import type { HephApi, AgentEvent } from '@shared/types'
+import type { HephApi, AgentEvent, InstallEvent } from '@shared/types'
 
 const api: HephApi = {
   // Resolve the absolute filesystem path of a dropped File. Electron 32+ removed
@@ -10,6 +10,8 @@ const api: HephApi = {
   listHarnesses: () => ipcRenderer.invoke(IPC.listHarnesses),
   addHarness: (input) => ipcRenderer.invoke(IPC.addHarness, input),
   removeHarness: (id) => ipcRenderer.invoke(IPC.removeHarness, id),
+  getHarnessPresets: () => ipcRenderer.invoke(IPC.getHarnessPresets),
+  installHarness: (input) => ipcRenderer.invoke(IPC.installHarness, input),
 
   listProjects: (harnessId) => ipcRenderer.invoke(IPC.listProjects, harnessId),
   loadSession: (harnessId, path) => ipcRenderer.invoke(IPC.loadSession, { harnessId, path }),
@@ -45,6 +47,11 @@ const api: HephApi = {
     const listener = (_e: unknown, cwd: string) => cb(cwd)
     ipcRenderer.on(IPC.evtProjectChanged, listener)
     return () => ipcRenderer.removeListener(IPC.evtProjectChanged, listener)
+  },
+  onInstallProgress: (cb) => {
+    const listener = (_e: unknown, event: InstallEvent) => cb(event)
+    ipcRenderer.on(IPC.evtInstallProgress, listener)
+    return () => ipcRenderer.removeListener(IPC.evtInstallProgress, listener)
   }
 }
 

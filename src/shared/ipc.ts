@@ -4,6 +4,8 @@ export const IPC = {
   listHarnesses: 'harness:list',
   addHarness: 'harness:add',
   removeHarness: 'harness:remove',
+  getHarnessPresets: 'harness:presets',
+  installHarness: 'harness:install',
 
   listProjects: 'session:listProjects',
   loadSession: 'session:load',
@@ -28,5 +30,6 @@ export const IPC = {
   // main -> renderer events
   evtSessionUpdated: 'evt:sessionUpdated',
   evtAgentEvent: 'evt:agentEvent',
-  evtProjectChanged: 'evt:projectChanged'
+  evtProjectChanged: 'evt:projectChanged',
+  evtInstallProgress: 'evt:installProgress'
 } as const

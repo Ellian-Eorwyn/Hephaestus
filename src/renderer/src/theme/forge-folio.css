@@ -1084,6 +1084,9 @@ button:focus-visible {
 .dot.offline {
   background: var(--copper-dim);
 }
+.dot.ready {
+  background: var(--text-faint);
+}
 .statusbar .spacer {
   margin-left: auto;
 }
@@ -1201,11 +1204,106 @@ button:focus-visible {
 .field input:focus {
   outline: 1px solid var(--copper);
 }
+.modal.wide {
+  width: 620px;
+  max-width: 92vw;
+  max-height: 88vh;
+  overflow-y: auto;
+}
 .modal-actions {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
   margin-top: 8px;
+}
+
+/* ---------------------------------------------------------------------------
+   One-click install cards (Add Harness modal)
+   --------------------------------------------------------------------------- */
+.install-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.install-card {
+  background: var(--bg-0);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+}
+.install-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.install-card-head h4 {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-0);
+}
+.install-badge {
+  margin-left: auto;
+  font-size: 9.5px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--green);
+}
+.install-badge.muted-badge {
+  color: var(--text-faint);
+}
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-bottom: 8px;
+}
+.chip {
+  font-size: 9.5px;
+  letter-spacing: 0.03em;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  color: var(--text-1);
+}
+.install-cmd {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-faint);
+  background: var(--bg-2);
+  border-radius: 5px;
+  padding: 6px 8px;
+  margin-bottom: 8px;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+.install-btn {
+  align-self: flex-start;
+}
+.install-log {
+  margin: 10px 0 0;
+  max-height: 160px;
+  overflow-y: auto;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--copper-dim);
+  border-radius: 5px;
+  padding: 8px 10px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--text-1);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.install-log.done {
+  border-left-color: var(--green);
+}
+.install-log.error {
+  border-left-color: var(--copper-bright);
 }
 
 /* ---------------------------------------------------------------------------

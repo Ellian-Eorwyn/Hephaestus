@@ -47,6 +47,14 @@ export function Dashboard(): JSX.Element {
       <div className="dash-grid">
         {stats.map((s) => {
           const health = backend[s.id]
+          const status = health?.status
+          const statusColor =
+            status === 'online'
+              ? 'var(--green)'
+              : status === 'offline'
+                ? 'var(--copper-dim)'
+                : 'var(--text-faint)'
+          const statusLabel = status === 'ready' ? 'ready' : (status ?? 'offline')
           return (
             <div className="card" key={s.id}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -54,9 +62,9 @@ export function Dashboard(): JSX.Element {
                 <h3>{s.label}</h3>
                 <span
                   className="label-tech"
-                  style={{ marginLeft: 'auto', color: health?.online ? 'var(--green)' : 'var(--text-faint)' }}
+                  style={{ marginLeft: 'auto', color: statusColor }}
                 >
-                  <Activity size={11} /> {health?.online ? 'online' : 'offline'}
+                  <Activity size={11} /> {statusLabel}
                 </span>
               </div>
               <div style={{ display: 'flex', gap: 20, margin: '16px 0' }}>

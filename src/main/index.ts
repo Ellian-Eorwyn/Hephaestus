@@ -7,8 +7,11 @@ import { SessionStore } from './session-store'
 import { FileService } from './file-service'
 import { checkBackend } from './backend-health'
 import { AgentDriver } from './agent-driver'
+import { HarnessInstaller } from './harness-installer'
+import { getPreset } from '@shared/harness-presets'
+import { expandHome, normalizeDir } from './harness-registry'
 import { encodeCwd } from './session-parse'
-import type { AgentEvent } from '@shared/types'
+import type { AgentEvent, InstallEvent } from '@shared/types'
 
 const registry = new HarnessRegistry()
 const sessions = new SessionStore()
@@ -17,6 +20,10 @@ let mainWindow: BrowserWindow | null = null
 
 const agent = new AgentDriver((event: AgentEvent) => {
   mainWindow?.webContents.send(IPC.evtAgentEvent, event)
+})
+
+const installer = new HarnessInstaller((event: InstallEvent) => {
+  mainWindow?.webContents.send(IPC.evtInstallProgress, event)
 })
 
 function createWindow(): void {
@@ -65,6 +72,28 @@ function registerIpc(): void {
     agent.closeHarness(id)
     return registry.remove(id)
   })
+
+  ipcMain.handle(IPC.getHarnessPresets, () => installer.statuses(registry))
+  ipcMain.handle(
+    IPC.installHarness,
+    async (_e, input: { presetId: string; mode: 'install' | 'update' }) => {
+      const preset = getPreset(input.presetId)
+      if (!preset) return { ok: false, reason: `Unknown preset ${input.presetId}` }
+      const result = await installer.run(input.presetId, input.mode)
+      if (!result.ok) return { ok: false, reason: result.reason }
+      // Register the freshly-installed harness if it isn't already known.
+      const agentDir = expandHome(preset.agentDir)
+      const already = registry.list().find((h) => normalizeDir(h.agentDir) === normalizeDir(agentDir))
+      if (already) {
+        watchHarnesses()
+        return { ok: true, harnesses: registry.list(), harnessId: already.id }
+      }
+      const harnesses = await registry.add({ label: preset.label, agentDir })
+      watchHarnesses()
+      const added = harnesses.find((h) => normalizeDir(h.agentDir) === normalizeDir(agentDir))
+      return { ok: true, harnesses, harnessId: added?.id }
+    }
+  )
 
   ipcMain.handle(IPC.listProjects, async (_e, harnessId: string) => {
     const h = registry.get(harnessId)

@@ -23,19 +23,30 @@ export function StatusBar(): JSX.Element {
 
   // On the Dashboard there is no single active harness, so summarize all of them.
   const allHealth = Object.values(backend)
-  const onlineCount = allHealth.filter((h) => h.online).length
+  const liveCount = allHealth.filter((h) => h.status !== 'offline').length
+
+  const status = health?.status
+  const dotClass = status === 'online' ? 'online' : status === 'ready' ? 'ready' : 'offline'
+  const label =
+    status === 'online'
+      ? 'BACKEND ONLINE'
+      : status === 'ready'
+        ? 'HARNESS READY'
+        : status === 'offline'
+          ? 'BACKEND OFFLINE'
+          : 'NO BACKEND'
 
   return (
     <footer className="statusbar">
       {harnessId ? (
         <span>
-          <span className={`dot ${health?.online ? 'online' : 'offline'}`} />
-          {health ? (health.online ? 'BACKEND ONLINE' : 'BACKEND OFFLINE') : 'NO BACKEND'}
+          <span className={`dot ${dotClass}`} />
+          {label}
         </span>
       ) : (
         <span>
-          <span className={`dot ${onlineCount > 0 ? 'online' : 'offline'}`} />
-          {onlineCount}/{allHealth.length || 0} HARNESSES ONLINE
+          <span className={`dot ${liveCount > 0 ? 'online' : 'offline'}`} />
+          {liveCount}/{allHealth.length || 0} HARNESSES LIVE
         </span>
       )}
       {health?.online && health.models[0] && <span className="muted">{health.models[0]}</span>}
