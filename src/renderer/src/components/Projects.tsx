@@ -16,7 +16,7 @@ import {
 import { useStore, projectKey, samePath, isActive } from '../store/store'
 import { ForgeAnvil } from './ForgeAnvil'
 import { BallPeenHammer } from './BallPeenHammer'
-import type { ProjectSummary } from '@shared/types'
+import type { ProjectSummary, SessionSummary } from '@shared/types'
 
 function formatTokens(n: number): string {
   if (n >= 1000) return `${(n / 1000).toFixed(1)}k`
@@ -184,10 +184,15 @@ function ProjectRow({
   const unarchive = useStore((s) => s.unarchive)
   const deleteProject = useStore((s) => s.deleteProject)
 
-  const runs = useStore((s) => s.runs)
-  const projectRunning = Object.values(runs).some(
-    (r) => isActive(r.status) && samePath(r.cwd, p.cwd)
-  )
+  // A boolean rather than the whole runs map, so a streaming turn doesn't
+  // re-render every project row on every frame of output.
+  const projectRunning = useStore((s) => {
+    for (const id in s.runs) {
+      const r = s.runs[id]
+      if (isActive(r.status) && samePath(r.cwd, p.cwd)) return true
+    }
+    return false
+  })
 
   const key = harnessId ? projectKey(harnessId, p.encoded) : p.encoded
   const open = !!expanded[p.encoded] && !selectionMode
@@ -266,25 +271,46 @@ function ProjectRow({
         )}
       </div>
       {open &&
-        p.sessions.map((sess) => {
-          const sessionRunning = Object.values(runs).some(
-            (r) => isActive(r.status) && samePath(r.sessionPath, sess.path)
-          )
-          return (
-            <div
-              key={sess.path}
-              className={`session-row ${selectedSessionPath === sess.path ? 'active' : ''}`}
-              onClick={() => harnessId && selectSession(harnessId, sess.path, p.cwd)}
-            >
-              <MessageSquare size={13} className="muted" />
-              <span className="stitle" title={sess.title}>
-                {sess.title}
-              </span>
-              {sessionRunning && <span className="run-dot" title="Working" />}
-              {sess.totalTokens > 0 && <span className="stoks">{formatTokens(sess.totalTokens)}</span>}
-            </div>
-          )
-        })}
+        p.sessions.map((sess) => (
+          <SessionRow
+            key={sess.path}
+            session={sess}
+            active={selectedSessionPath === sess.path}
+            onClick={() => harnessId && selectSession(harnessId, sess.path, p.cwd)}
+          />
+        ))}
+    </div>
+  )
+}
+
+/**
+ * One session in the sidebar. Its own subscription is a single boolean, so a
+ * streaming turn repaints at most the row it belongs to.
+ */
+function SessionRow({
+  session: sess,
+  active,
+  onClick
+}: {
+  session: SessionSummary
+  active: boolean
+  onClick: () => void
+}): JSX.Element {
+  const running = useStore((s) => {
+    for (const id in s.runs) {
+      const r = s.runs[id]
+      if (isActive(r.status) && samePath(r.sessionPath, sess.path)) return true
+    }
+    return false
+  })
+  return (
+    <div className={`session-row ${active ? 'active' : ''}`} onClick={onClick}>
+      <MessageSquare size={13} className="muted" />
+      <span className="stitle" title={sess.title}>
+        {sess.title}
+      </span>
+      {running && <span className="run-dot" title="Working" />}
+      {sess.totalTokens > 0 && <span className="stoks">{formatTokens(sess.totalTokens)}</span>}
     </div>
   )
 }

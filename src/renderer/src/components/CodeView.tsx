@@ -6,12 +6,37 @@ interface Line {
   tokens: { content: string; color?: string }[]
 }
 
-export function CodeView({ code, language }: { code: string; language?: string }): JSX.Element {
+/**
+ * Above this size, skip syntax highlighting. Shiki tokenizes on the main thread,
+ * and a live-updating large file would re-tokenize on every save.
+ */
+const MAX_HIGHLIGHT_BYTES = 300_000
+
+export function CodeView({
+  code,
+  language,
+  path
+}: {
+  code: string
+  language?: string
+  path?: string
+}): JSX.Element {
   const theme = useStore((s) => s.theme)
   const [lines, setLines] = useState<Line[] | null>(null)
 
+  // Switching files must drop the previous file's tokens, which would otherwise
+  // stay on screen for a frame. A *content* change deliberately keeps them, so a
+  // live reload re-highlights in place instead of flashing "Rendering…".
+  useEffect(() => {
+    setLines(null)
+  }, [path])
+
   useEffect(() => {
     let cancelled = false
+    if (code.length > MAX_HIGHLIGHT_BYTES) {
+      setLines(code.split('\n').map((l) => ({ tokens: [{ content: l }] })))
+      return
+    }
     const lang = normalizeLang(language)
     getHighlighter()
       .then((hl) => {

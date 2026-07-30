@@ -2,11 +2,15 @@ import { create } from 'zustand'
 import type {
   HarnessConfig,
   ProjectSummary,
+  SessionSummary,
+  SessionUpdatePayload,
   SessionDetail,
   FileNode,
   FileContent,
   BackendHealth,
-  AgentEvent,
+  AgentBatch,
+  AgentStreamEvent,
+  StatsPatch,
   RunStatus,
   RunSnapshot,
   ThreadMessage,
@@ -20,8 +24,14 @@ const heph = window.heph
 
 type View = 'dashboard' | { harnessId: string }
 
-/** Renderer-side mirror of a main-process run, with accumulated stream text. */
-export interface RunState {
+/**
+ * Renderer-side mirror of a main-process run — everything *except* the stream
+ * text. The accumulated text lives in `streams`, keyed by the same runId, so the
+ * ~30 commits/sec of a live turn touch only that map. Anything watching runs
+ * (the sidebar, the status bar, the composer) then re-renders on real lifecycle
+ * changes instead of on every frame of output.
+ */
+export interface RunMeta {
   runId: string
   harnessId: string
   cwd: string
@@ -29,11 +39,55 @@ export interface RunState {
   status: RunStatus
   currentTool?: string
   startedAt: number
-  /** Accumulated visible stream for this run. */
-  text: string
-  /** Accumulated reasoning stream for this run. */
-  thinking: string
   error?: string
+  /** The harness stopped answering liveness pings mid-turn. */
+  unresponsive?: boolean
+  /** Display-only status pushed by a harness extension (`ctx.ui.setStatus`). */
+  uiStatus?: { status?: string; title?: string; widget?: string[] }
+  /** Messages the harness is holding to deliver during / after the current turn. */
+  queued?: { steering: string[]; followUp: string[] }
+  /** A non-streaming activity the turn is occupied by (otherwise it looks like a hang). */
+  phase?: 'compacting' | 'retrying' | null
+  /** In-flight automatic retry after a provider failure. */
+  retry?: {
+    attempt: number
+    maxAttempts: number
+    delayMs: number
+    startedAt: number
+    errorMessage: string
+  }
+}
+
+/**
+ * Accumulated stream buffers for one run. `rev` counts applied batches so an
+ * effect can depend on "the stream advanced" without diffing strings.
+ */
+export interface RunStream {
+  text: string
+  thinking: string
+  rev: number
+}
+
+const EMPTY_STREAM: RunStream = { text: '', thinking: '', rev: 0 }
+
+/**
+ * Did any displayed field of a run actually change? Lets a text-only batch skip
+ * replacing the `runs` map, which is what keeps the sidebar and status bar still
+ * during a stream.
+ */
+function shallowEqualMeta(a: RunMeta, b: RunMeta): boolean {
+  return (
+    a.status === b.status &&
+    a.currentTool === b.currentTool &&
+    a.sessionPath === b.sessionPath &&
+    a.cwd === b.cwd &&
+    a.error === b.error &&
+    a.unresponsive === b.unresponsive &&
+    a.uiStatus === b.uiStatus &&
+    a.queued === b.queued &&
+    a.phase === b.phase &&
+    a.retry === b.retry
+  )
 }
 
 /** A blocking interactive prompt from the harness awaiting the user's answer. */
@@ -92,26 +146,59 @@ export function samePath(a?: string | null, b?: string | null): boolean {
 }
 
 /**
+ * File-path equality for matching watcher events against the open file. Exact
+ * first, then case-insensitive — macOS filesystems are case-insensitive by
+ * default, so chokidar and our own path can differ only in case and still be the
+ * same file. (On a case-sensitive volume this could in principle conflate two
+ * files differing only by case; missing a live update is the worse failure.)
+ */
+export function sameFilePath(a?: string | null, b?: string | null): boolean {
+  if (!a || !b) return false
+  if (a === b) return true
+  return a.toLowerCase() === b.toLowerCase()
+}
+
+type RunTargetState = {
+  runs: Record<string, RunMeta>
+  selectedSessionPath: string | null
+  selectedCwd: string | null
+}
+
+/**
  * The run feeding the currently-viewed session: matched by sessionPath when a
  * session is selected, or — for a brand-new chat not yet written to disk — the
  * pathless run for the selected cwd.
+ *
+ * Returns the id rather than the object so subscribers get a string primitive and
+ * don't re-render when unrelated fields of the run change.
  */
-export function selectCurrentRun(s: {
-  runs: Record<string, RunState>
-  selectedSessionPath: string | null
-  selectedCwd: string | null
-}): RunState | null {
+export function selectCurrentRunId(s: RunTargetState): string | null {
   const list = Object.values(s.runs)
   if (s.selectedSessionPath) {
-    return list.find((r) => samePath(r.sessionPath, s.selectedSessionPath)) ?? null
+    return list.find((r) => samePath(r.sessionPath, s.selectedSessionPath))?.runId ?? null
   }
   if (s.selectedCwd) {
-    return list.find((r) => !r.sessionPath && samePath(r.cwd, s.selectedCwd) && isActive(r.status)) ?? null
+    return (
+      list.find((r) => !r.sessionPath && samePath(r.cwd, s.selectedCwd) && isActive(r.status))
+        ?.runId ?? null
+    )
   }
   return null
 }
 
-function snapshotToRun(s: RunSnapshot): RunState {
+export function selectCurrentRun(s: RunTargetState): RunMeta | null {
+  const id = selectCurrentRunId(s)
+  return id ? (s.runs[id] ?? null) : null
+}
+
+/** Number of runs currently doing something — a primitive for the status bar. */
+export function countActive(runs: Record<string, RunMeta>): number {
+  let n = 0
+  for (const id in runs) if (isActive(runs[id].status)) n++
+  return n
+}
+
+function snapshotToMeta(s: RunSnapshot): RunMeta {
   return {
     runId: s.runId,
     harnessId: s.harnessId,
@@ -120,9 +207,250 @@ function snapshotToRun(s: RunSnapshot): RunState {
     status: s.status,
     currentTool: s.currentTool,
     startedAt: s.startedAt,
-    text: s.streamTail,
-    thinking: s.thinkingTail,
-    error: s.error
+    error: s.error,
+    unresponsive: s.unresponsive,
+    uiStatus: s.uiStatus
+  }
+}
+
+/**
+ * Last applied batch seq per run. Batches are ordered and monotonic, so this
+ * both drops duplicates (a double-registered listener under StrictMode would
+ * otherwise append every delta twice) and detects a dropped batch.
+ */
+const lastSeq = new Map<string, number>()
+
+/**
+ * Main-process subscriptions are process-wide, not per-mount. `init()` runs again
+ * on every StrictMode remount, so guard the wiring — registering the batch
+ * listener twice would apply every batch twice.
+ */
+let wired = false
+const unsubscribes: Array<() => void> = []
+/** Guards against overlapping full tree re-listings during a burst of changes. */
+let relistInFlight = false
+
+function wireSubscriptions(
+  get: () => State,
+  set: (patch: Partial<State> | ((s: State) => Partial<State>)) => void
+): void {
+  // Live session updates -> refresh open session if it changed.
+  unsubscribes.push(
+    heph.onSessionUpdated((payload) => {
+      void get().applySessionUpdate(payload)
+    })
+  )
+  unsubscribes.push(heph.onAgentBatch((b) => get().applyAgentBatch(b)))
+  unsubscribes.push(
+    heph.onProjectChanged((payload) => {
+      const st = get()
+      if (!samePath(st.selectedCwd, payload.cwd)) return
+
+      // Only a structural change moves the tree. A plain content edit — which is
+      // what the agent does most — leaves the listing identical, so re-reading a
+      // depth-8 directory tree for it is pure waste.
+      const structural =
+        payload.overflow || payload.changes.some((c) => c.type !== 'change')
+      // A mass event (an install, a branch switch) reaches us as a trickle of
+      // bursts rather than one, so collapse overlapping re-lists into one pass.
+      if (structural && !relistInFlight) {
+        relistInFlight = true
+        heph
+          .listFiles(payload.cwd)
+          .then((fileTree) => {
+            if (samePath(get().selectedCwd, payload.cwd)) set({ fileTree })
+          })
+          .catch(() => {})
+          .finally(() => {
+            relistInFlight = false
+          })
+      }
+
+      // Reload the open file. This is the step that was missing: the watcher fired
+      // and the tree refreshed, but `fileContent` was only ever written by a click,
+      // so the preview kept showing the bytes captured when you opened it.
+      const open = st.selectedFile
+      if (!open) return
+      const hit = payload.changes.find((c) => sameFilePath(c.path, open))
+      if (!hit && !payload.overflow) return
+
+      if (hit?.type === 'unlink') {
+        // Keep the last content on screen (it's still the most useful thing to
+        // show) and mark it gone.
+        set({ fileMissing: true })
+        return
+      }
+      const cur = st.fileContent
+      if (
+        hit &&
+        cur &&
+        cur.mtimeMs !== undefined &&
+        cur.mtimeMs === hit.mtimeMs &&
+        cur.size === hit.size
+      ) {
+        return
+      }
+      heph
+        .readFile(open)
+        .then((fileContent) => set({ fileContent, fileMissing: false }))
+        .catch(() => set({ fileMissing: true }))
+    })
+  )
+
+  // Stream one-click install output into per-preset logs.
+  unsubscribes.push(
+    heph.onInstallProgress((e) => {
+      set((s) => {
+        const prev = s.installLogs[e.presetId] ?? { status: 'idle', lines: [] }
+        const next: InstallLog = { ...prev }
+        if (e.type === 'stdout' || e.type === 'stderr') {
+          next.status = 'running'
+          next.lines = [...prev.lines, e.line ?? '']
+        } else if (e.type === 'done') {
+          next.status = 'done'
+        } else if (e.type === 'error') {
+          next.status = 'error'
+          if (e.reason) next.lines = [...prev.lines, e.reason]
+        }
+        return { installLogs: { ...s.installLogs, [e.presetId]: next } }
+      })
+    })
+  )
+
+  // Resync when the window regains focus so a stale/disconnected UI self-heals
+  // without a relaunch. `focus` and `visibilitychange` both fire on activation, so
+  // debounce them into a single round-trip.
+  let resyncTimer: ReturnType<typeof setTimeout> | null = null
+  const resyncSoon = (): void => {
+    if (resyncTimer) return
+    resyncTimer = setTimeout(() => {
+      resyncTimer = null
+      void get().resyncRuns()
+    }, 150)
+  }
+  const onVisible = (): void => {
+    if (document.visibilityState === 'visible') resyncSoon()
+  }
+  window.addEventListener('focus', resyncSoon)
+  document.addEventListener('visibilitychange', onVisible)
+  unsubscribes.push(() => {
+    window.removeEventListener('focus', resyncSoon)
+    document.removeEventListener('visibilitychange', onVisible)
+  })
+}
+
+/** How long an agent edit stays interesting enough to keep in the map. */
+const AGENT_EDIT_TTL_MS = 5 * 60_000
+
+/**
+ * Merge a stats patch over the running values. Only fields actually present in the
+ * patch overwrite, so a usage-only update from `message_end` doesn't wipe the
+ * throughput figures the provider reported mid-stream.
+ */
+function mergeStats(prev: StatsPatch, patch: StatsPatch): StatsPatch {
+  const next: StatsPatch = { ...prev }
+  for (const k of Object.keys(patch) as (keyof StatsPatch)[]) {
+    const v = patch[k]
+    if (v !== undefined) (next[k] as unknown) = v
+  }
+  return next
+}
+
+/** Tools that write to disk, and whose `path` argument is therefore worth flagging. */
+const WRITING_TOOLS = new Set(['edit', 'write'])
+
+/**
+ * Absolute paths the agent is writing in this batch. `bash` is deliberately
+ * excluded: its command is opaque, so any file it touches surfaces through the
+ * filesystem watcher instead.
+ */
+function collectEditedPaths(events: AgentStreamEvent[], cwd: string): string[] {
+  const out: string[] = []
+  for (const e of events) {
+    if (e.type !== 'tool_execution_start' && e.type !== 'tool_execution_end') continue
+    if (!WRITING_TOOLS.has(e.toolName)) continue
+    const raw = e.type === 'tool_execution_start' ? e.args?.path : undefined
+    if (typeof raw !== 'string' || !raw) continue
+    // Tool paths are normally absolute; resolve the occasional relative one
+    // against the run's working directory (no node:path in the renderer).
+    out.push(raw.startsWith('/') ? raw : `${cwd.replace(/\/+$/, '')}/${raw.replace(/^\.\//, '')}`)
+  }
+  return out
+}
+
+/** Fold one stream event into a run draft. Mutates — the caller owns the copy. */
+function applyEventToRun(r: RunMeta, e: AgentStreamEvent): void {
+  switch (e.type) {
+    case 'tool_execution_start':
+      r.currentTool = e.toolName
+      break
+    case 'tool_execution_end':
+      if (r.currentTool === e.toolName) r.currentTool = undefined
+      break
+    case 'agent_end': {
+      r.currentTool = undefined
+      r.phase = null
+      // Each queued message runs as its own turn, so `agent_end` only ends *this*
+      // turn. With work still queued the run keeps going; only the last turn hands
+      // off to the authoritative reload.
+      const pending = (r.queued?.steering.length ?? 0) + (r.queued?.followUp.length ?? 0)
+      if (pending === 0) r.status = 'finalizing'
+      break
+    }
+    case 'agent_settled':
+      // Nothing left queued. This is the reliable end-of-work signal (pi's own
+      // waitForIdle uses it), and it covers the case where a queued turn ended
+      // without us seeing the queue drain.
+      if (r.status === 'running') r.status = 'finalizing'
+      r.phase = null
+      r.retry = undefined
+      break
+    case 'queue_update':
+      r.queued = { steering: e.steering, followUp: e.followUp }
+      break
+    case 'compaction_start':
+      r.phase = 'compacting'
+      break
+    case 'compaction_end':
+      r.phase = null
+      break
+    case 'auto_retry_start':
+      r.phase = 'retrying'
+      r.retry = {
+        attempt: e.attempt,
+        maxAttempts: e.maxAttempts,
+        delayMs: e.delayMs,
+        startedAt: Date.now(),
+        errorMessage: e.errorMessage
+      }
+      break
+    case 'auto_retry_end':
+      r.phase = null
+      r.retry = undefined
+      break
+    case 'agent_exit':
+      if (r.status !== 'error' && r.status !== 'finalizing') r.status = 'idle'
+      break
+    case 'error':
+      r.status = 'error'
+      r.error = e.errorReason
+      break
+    case 'unresponsive':
+      r.unresponsive = true
+      break
+    case 'responsive':
+      r.unresponsive = undefined
+      break
+    case 'ui_status': {
+      const next = { ...(r.uiStatus ?? {}) }
+      if ('status' in e) next.status = e.status
+      if ('title' in e) next.title = e.title
+      if ('widget' in e) next.widget = e.widget
+      r.uiStatus = next
+      break
+    }
+    default:
+      break
   }
 }
 
@@ -182,7 +510,22 @@ interface State {
   loadingSession: boolean
 
   // live runs (keyed by runId) — renderer mirror of the main-process registry
-  runs: Record<string, RunState>
+  runs: Record<string, RunMeta>
+  /**
+   * In-flight stream text, keyed by runId. Split out of `runs` because this is the
+   * only slice that changes per frame during a turn.
+   */
+  streams: Record<string, RunStream>
+  /**
+   * Live throughput/usage per run, merged as stats patches arrive. Cleared when a
+   * run retires.
+   */
+  statsLive: Record<string, StatsPatch>
+  /**
+   * Authoritative end-of-turn totals per session path. Outlives the run, so the
+   * status bar keeps showing real cost/context after the turn finishes.
+   */
+  sessionStats: Record<string, StatsPatch>
   /** True while a resync (agentListRuns) is in flight, for the reconnect chip. */
   reconnecting: boolean
 
@@ -190,11 +533,24 @@ interface State {
   pendingPrompts: Record<string, PendingPrompt>
   /** Transient non-blocking notices from the harness (`notify`). */
   notices: Notice[]
+  /**
+   * Text handed back to the composer after the harness refused a prompt, so the
+   * message isn't lost. The composer consumes and clears it.
+   */
+  draftRestore: string | null
 
   // inspector
   fileTree: FileNode[]
   selectedFile: string | null
   fileContent: FileContent | null
+  /** The open file was deleted on disk; its last content is still shown. */
+  fileMissing: boolean
+  /**
+   * Absolute path -> epoch ms of the last time the agent wrote to it, taken from
+   * the RPC tool stream. Drives the "just edited" flash in the tree, and arrives
+   * before the filesystem event does.
+   */
+  agentEdits: Record<string, number>
   /** When true, the file being viewed is silently attached to the next prompt. */
   attachViewedFile: boolean
 
@@ -259,12 +615,29 @@ interface State {
   addProject: (cwd: string) => Promise<void>
   browseAndAddProject: () => Promise<void>
 
-  sendPrompt: (text: string) => Promise<void>
+  /**
+   * Send a prompt. While a turn is streaming this queues instead: `followUp` runs
+   * after the current turn, `steer` lands inside it. Resolves false when the
+   * message did not reach the agent.
+   */
+  sendPrompt: (text: string, behavior?: 'steer' | 'followUp') => Promise<boolean>
+  /** Consume the restored draft (after a rejected prompt). */
+  takeDraftRestore: () => string | null
+  abortRetry: () => Promise<void>
+  /** Kill an unresponsive run so the next prompt starts a fresh process. */
+  restartRun: (runId: string) => Promise<void>
   answerPrompt: (id: string, response: ExtensionUIResponse) => Promise<void>
   dismissNotice: (id: string) => void
   abort: () => Promise<void>
-  applySessionUpdate: (path: string) => Promise<void>
-  applyAgentEvent: (e: AgentEvent) => void
+  /**
+   * Apply a session-file change. Takes the watcher's payload (which carries a
+   * ready-made summary), or a bare path when we learn about a session another way
+   * (a newly-bound run) and have no summary yet.
+   */
+  applySessionUpdate: (payload: SessionUpdatePayload | string) => Promise<void>
+  /** Replace one session's row in the sidebar without re-listing the harness. */
+  patchSessionSummary: (projectEncoded: string, summary: SessionSummary) => void
+  applyAgentBatch: (b: AgentBatch) => void
   finalizeRun: (runId: string, attempt?: number) => Promise<void>
   resyncRuns: () => Promise<void>
 }
@@ -301,14 +674,20 @@ export const useStore = create<State>((set, get) => {
   loadingSession: false,
 
   runs: {},
+  streams: {},
+  statsLive: {},
+  sessionStats: {},
   reconnecting: false,
 
   pendingPrompts: {},
   notices: [],
+  draftRestore: null,
 
   fileTree: [],
   selectedFile: null,
   fileContent: null,
+  fileMissing: false,
+  agentEdits: {},
   attachViewedFile: settings.autoAttachFile ?? true,
 
   backend: {},
@@ -321,46 +700,18 @@ export const useStore = create<State>((set, get) => {
     const harnesses = await heph.listHarnesses()
     set({ harnesses })
 
-    // Live session updates -> refresh open session if it changed.
-    heph.onSessionUpdated(({ path }) => {
-      void get().applySessionUpdate(path)
-    })
-    heph.onAgentEvent((e) => get().applyAgentEvent(e))
-    heph.onProjectChanged((cwd) => {
-      if (samePath(get().selectedCwd, cwd)) {
-        heph.listFiles(cwd).then((fileTree) => set({ fileTree })).catch(() => {})
-      }
-    })
-
-    // Stream one-click install output into per-preset logs.
-    heph.onInstallProgress((e) => {
-      set((s) => {
-        const prev = s.installLogs[e.presetId] ?? { status: 'idle', lines: [] }
-        const next: InstallLog = { ...prev }
-        if (e.type === 'stdout' || e.type === 'stderr') {
-          next.status = 'running'
-          next.lines = [...prev.lines, e.line ?? '']
-        } else if (e.type === 'done') {
-          next.status = 'done'
-        } else if (e.type === 'error') {
-          next.status = 'error'
-          if (e.reason) next.lines = [...prev.lines, e.reason]
-        }
-        return { installLogs: { ...s.installLogs, [e.presetId]: next } }
-      })
-    })
+    // Subscribe exactly once. React StrictMode mounts effects twice in dev, and
+    // registering the batch listener twice would apply every batch twice.
+    if (!wired) {
+      wired = true
+      wireSubscriptions(get, set)
+    }
 
     // Load installer presets (best-effort; powers the Add Harness modal).
     void get().loadHarnessPresets()
 
-    // Reconnect to any in-flight runs now (survives renderer reloads) and again
-    // whenever the window regains focus, so a stale/disconnected UI self-heals
-    // without a relaunch.
+    // Reconnect to any in-flight runs now (survives renderer reloads).
     void get().resyncRuns()
-    window.addEventListener('focus', () => void get().resyncRuns())
-    document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible') void get().resyncRuns()
-    })
 
     // Kick a backend check per harness (best-effort).
     for (const h of harnesses) void get().refreshBackend(h.id)
@@ -584,12 +935,12 @@ export const useStore = create<State>((set, get) => {
 
   selectFile: async (path) => {
     // Opening a new file applies the auto-attach default (Settings).
-    set({ selectedFile: path, attachViewedFile: get().autoAttachFile })
+    set({ selectedFile: path, attachViewedFile: get().autoAttachFile, fileMissing: false })
     try {
       const fileContent = await heph.readFile(path)
       set({ fileContent })
     } catch {
-      set({ fileContent: null })
+      set({ fileContent: null, fileMissing: true })
     }
   },
 
@@ -600,6 +951,15 @@ export const useStore = create<State>((set, get) => {
       void heph.watchProject(cwd)
       const fileTree = await heph.listFiles(cwd)
       set({ fileTree })
+      // Refresh means refresh: re-read the open file too, not just the listing.
+      const open = get().selectedFile
+      if (open) {
+        try {
+          set({ fileContent: await heph.readFile(open), fileMissing: false })
+        } catch {
+          set({ fileMissing: true })
+        }
+      }
     } catch {
       // ignore
     }
@@ -629,10 +989,10 @@ export const useStore = create<State>((set, get) => {
     await get().addProject(folder)
   },
 
-  sendPrompt: async (text) => {
+  sendPrompt: async (text, behavior) => {
     const harnessId = get().activeHarnessId()
     const cwd = get().selectedCwd
-    if (!harnessId || !cwd) return
+    if (!harnessId || !cwd) return false
 
     // If a file is open and auto-attach is on, silently tell the agent which
     // file the user is looking at so references like "this" resolve. The chat
@@ -664,6 +1024,14 @@ export const useStore = create<State>((set, get) => {
     })
 
     const sessionPath = get().selectedSessionPath ?? undefined
+
+    // A turn already in flight means this is a steer / follow-up: reuse that run
+    // and leave its live state completely alone. Resetting it here is what used to
+    // wipe the reply on screen while the message itself was silently rejected.
+    const activeId = selectCurrentRunId(get())
+    const active = activeId ? get().runs[activeId] : undefined
+    const midStream = !!active && isWorking(active.status)
+
     const open = await heph.agentOpen({ harnessId, cwd, sessionPath })
     if (!open.ok || !open.runId) {
       // Surface the reason as a system message.
@@ -678,19 +1046,39 @@ export const useStore = create<State>((set, get) => {
             }
           : s.session
       }))
-      return
+      return false
     }
 
     const runId = open.runId
+    if (midStream) {
+      const res = await heph.agentSend({ runId, text: sentText, behavior: behavior ?? 'followUp' })
+      if (!res.ok) {
+        set((s) => ({
+          notices: [
+            ...s.notices,
+            {
+              id: `err-${Date.now()}`,
+              message: res.reason ?? 'Could not queue that message.',
+              kind: 'error'
+            }
+          ]
+        }))
+        return false
+      }
+      return true
+    }
+
     set((s) => {
       // Drop any stale run for the same target (e.g. a prior errored or idle run
       // for this session) so exactly one run matches the viewed session.
-      const runs: Record<string, RunState> = {}
+      const runs: Record<string, RunMeta> = {}
+      const streams: Record<string, RunStream> = { ...s.streams }
       for (const [id, r] of Object.entries(s.runs)) {
         const sameTarget = sessionPath
           ? samePath(r.sessionPath, sessionPath)
           : !r.sessionPath && samePath(r.cwd, cwd)
-        if (!sameTarget) runs[id] = r
+        if (sameTarget) delete streams[id]
+        else runs[id] = r
       }
       runs[runId] = {
         runId,
@@ -698,13 +1086,22 @@ export const useStore = create<State>((set, get) => {
         cwd,
         sessionPath: sessionPath ?? null,
         status: 'running',
-        startedAt: Date.now(),
-        text: '',
-        thinking: ''
+        startedAt: Date.now()
       }
-      return { runs }
+      streams[runId] = { text: '', thinking: '', rev: 0 }
+      return { runs, streams }
     })
-    await heph.agentSend({ runId, text: sentText })
+    const res = await heph.agentSend({ runId, text: sentText })
+    if (!res.ok) {
+      set((s) => ({
+        notices: [
+          ...s.notices,
+          { id: `err-${Date.now()}`, message: res.reason ?? 'Could not send.', kind: 'error' }
+        ]
+      }))
+      return false
+    }
+    return true
   },
 
   answerPrompt: async (id, response) => {
@@ -726,31 +1123,140 @@ export const useStore = create<State>((set, get) => {
 
   dismissNotice: (id) => set((s) => ({ notices: s.notices.filter((n) => n.id !== id) })),
 
-  abort: async () => {
-    const run = selectCurrentRun(get())
-    if (!run) return
-    await heph.agentAbort(run.runId)
-    // Aborting releases any prompt this run was blocked on.
+  takeDraftRestore: () => {
+    const text = get().draftRestore
+    if (text) set({ draftRestore: null })
+    return text
+  },
+
+  abortRetry: async () => {
+    const runId = selectCurrentRunId(get())
+    if (!runId) return
+    await heph.agentAbortRetry(runId)
+  },
+
+  restartRun: async (runId) => {
+    // Close the wedged process and drop its local state; the next prompt spawns a
+    // fresh one via agentOpen.
+    try {
+      await heph.agentClose(runId)
+    } catch {
+      // ignore — it may already be gone
+    }
+    lastSeq.delete(runId)
     set((s) => {
-      const rest = Object.fromEntries(
-        Object.entries(s.pendingPrompts).filter(([, p]) => p.runId !== run.runId)
-      )
-      return { runs: { ...s.runs, [run.runId]: { ...run, status: 'idle' } }, pendingPrompts: rest }
+      const runs = { ...s.runs }
+      const streams = { ...s.streams }
+      const statsLive = { ...s.statsLive }
+      delete runs[runId]
+      delete streams[runId]
+      delete statsLive[runId]
+      return {
+        runs,
+        streams,
+        statsLive,
+        pendingPrompts: Object.fromEntries(
+          Object.entries(s.pendingPrompts).filter(([, p]) => p.runId !== runId)
+        )
+      }
     })
   },
 
-  applySessionUpdate: async (path) => {
+  patchSessionSummary: (projectEncoded, summary) => {
+    let known = false
+    set((s) => {
+      const idx = s.projects.findIndex((p) => p.encoded === projectEncoded)
+      if (idx < 0) return {}
+      known = true
+      const project = s.projects[idx]
+      const at = project.sessions.findIndex((x) => samePath(x.path, summary.path))
+      // Nothing to repaint if the row is byte-for-byte what we already show.
+      if (at >= 0) {
+        const prev = project.sessions[at]
+        if (
+          prev.title === summary.title &&
+          prev.messageCount === summary.messageCount &&
+          prev.totalTokens === summary.totalTokens &&
+          prev.timestamp === summary.timestamp
+        ) {
+          return {}
+        }
+      }
+      const sessions = [...project.sessions]
+      if (at >= 0) sessions[at] = summary
+      else sessions.push(summary)
+      sessions.sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1))
+
+      const projects = [...s.projects]
+      projects[idx] = { ...project, sessions }
+      // Keep most-recently-active projects first, matching listProjects' order.
+      projects.sort((a, b) => {
+        const ta = a.sessions[0]?.timestamp ?? ''
+        const tb = b.sessions[0]?.timestamp ?? ''
+        return ta < tb ? 1 : -1
+      })
+      return { projects }
+    })
+    // The session belongs to a project the sidebar hasn't listed yet.
+    if (!known) {
+      const view = get().view
+      if (view !== 'dashboard') void get().loadProjects(view.harnessId)
+    }
+  },
+
+  abort: async () => {
+    const runId = selectCurrentRunId(get())
+    if (!runId) return
+    await heph.agentAbort(runId)
+    // Read the run *inside* the update rather than reusing the copy captured
+    // before the await: batches can land while the abort is in flight, and writing
+    // back the stale object would silently drop that text. Streams are left
+    // untouched for the same reason.
+    set((s) => {
+      const run = s.runs[runId]
+      const rest = Object.fromEntries(
+        Object.entries(s.pendingPrompts).filter(([, p]) => p.runId !== runId)
+      )
+      if (!run) return { pendingPrompts: rest }
+      return { runs: { ...s.runs, [runId]: { ...run, status: 'idle' } }, pendingPrompts: rest }
+    })
+  },
+
+  applySessionUpdate: async (payload) => {
     const { view } = get()
     if (view === 'dashboard') return
+    // A path-only call (from session_bound) has no summary yet; treat it as a
+    // change to that file with unknown metadata.
+    const { path, summary, projectEncoded, isNew } =
+      typeof payload === 'string'
+        ? { path: payload, summary: null, projectEncoded: null, isNew: true }
+        : payload
 
-    // Re-fetch project list so the sidebar shows the new/updated session.
-    void get().loadProjects(view.harnessId)
+    // Patch the one project row that changed. Re-listing the whole harness here is
+    // what used to re-read and re-parse every session file of every project,
+    // several times a second, on the same thread that pumps the agent's output.
+    if (summary && projectEncoded) {
+      get().patchSessionSummary(projectEncoded, summary)
+    } else if (isNew) {
+      // A brand-new session (or an unreadable one) can imply a project we don't
+      // know about yet, which only a full listing can discover.
+      void get().loadProjects(view.harnessId)
+    }
 
     const { selectedSessionPath, selectedCwd } = get()
     const viewing =
       samePath(path, selectedSessionPath) || (selectedSessionPath === null && selectedCwd != null)
 
-    if (viewing) {
+    // While *our* run is streaming this session, the stream is the source of truth
+    // and the file lags behind it — reloading per tick would re-parse the thread
+    // repeatedly only to show text we already have. One authoritative reload
+    // happens at end of turn (finalizeRun), and a `finalizing` run still reloads
+    // here so an external writer (or a missed finalize) still reconciles.
+    const ownStreaming = Object.values(get().runs).some(
+      (r) => r.status === 'running' && samePath(r.sessionPath, path)
+    )
+
+    if (viewing && !ownStreaming) {
       let session: SessionDetail
       try {
         session = await heph.loadSession(view.harnessId, path)
@@ -777,6 +1283,20 @@ export const useStore = create<State>((set, get) => {
         }
         return changed ? { runs } : {}
       })
+    } else if (summary?.cwd) {
+      // Not reloading the thread, but still bind pathless runs so a new chat
+      // adopts its session file as soon as the harness creates it.
+      set((s) => {
+        const runs = { ...s.runs }
+        let changed = false
+        for (const [id, r] of Object.entries(runs)) {
+          if (!r.sessionPath && samePath(r.cwd, summary.cwd)) {
+            runs[id] = { ...r, sessionPath: path }
+            changed = true
+          }
+        }
+        return changed ? { runs } : {}
+      })
     }
 
     // Reconcile: retire a finalizing run for this session only once its reply is
@@ -789,136 +1309,292 @@ export const useStore = create<State>((set, get) => {
     if (replyLanded) {
       set((s) => {
         const runs = { ...s.runs }
+        const streams = { ...s.streams }
         let changed = false
         for (const [id, r] of Object.entries(runs)) {
           if (samePath(r.sessionPath, path) && r.status === 'finalizing') {
             delete runs[id]
+            delete streams[id]
+            lastSeq.delete(id)
             changed = true
           }
         }
-        return changed ? { runs } : {}
+        return changed ? { runs, streams } : {}
       })
     }
   },
 
-  applyAgentEvent: (e) => {
-    const runId = e.runId
+  applyAgentBatch: (b) => {
+    const runId = b.runId
     if (!runId) return
-    const { type } = e
 
-    // Only actual output (deltas/tool activity) may create a run. Trailing/meta
-    // events — late get_state responses, post-completion notices — must NOT
-    // resurrect a run that finalizeRun already retired, or the working indicator
-    // would restart with no agent_end ever coming. An interactive prompt counts
-    // as work: the turn paused mid-flight to ask the user something.
-    const isWork = !!(e.delta || e.thinkingDelta || e.toolName || type === 'extension_ui_request')
+    // Ordered + monotonic: anything we've already applied is a duplicate, and a
+    // skipped seq means we lost a batch and should rebuild from the registry.
+    const prev = lastSeq.get(runId) ?? 0
+    if (b.seq <= prev) return
+    const gap = prev > 0 && b.seq > prev + 1
+    lastSeq.set(runId, b.seq)
 
-    set((s) => {
-      const prev = s.runs[runId]
-      if (!prev && !isWork) return {}
-      const next: RunState = prev
-        ? { ...prev }
-        : {
-            runId,
-            harnessId: e.harnessId,
-            cwd: e.cwd ?? '',
-            sessionPath: e.sessionPath ?? null,
-            status: 'running',
-            startedAt: Date.now(),
-            text: '',
-            thinking: ''
-          }
-      if (e.cwd && !next.cwd) next.cwd = e.cwd
-      if (e.sessionPath && !next.sessionPath) next.sessionPath = e.sessionPath
-      if (e.delta) next.text += e.delta
-      if (e.thinkingDelta) next.thinking += e.thinkingDelta
-      if (e.toolName) next.currentTool = e.toolName
-      if (isActive(next.status) && (e.delta || e.thinkingDelta || e.toolName)) next.status = 'running'
-
-      if (type === 'agent_end') {
-        next.status = 'finalizing'
-        next.currentTool = undefined
-      } else if (type === 'agent_exit') {
-        if (next.status !== 'error' && next.status !== 'finalizing') next.status = 'idle'
-      } else if (type === 'error') {
-        next.status = 'error'
-        next.error = e.errorReason ?? 'Run failed.'
-      }
-
-      return { runs: { ...s.runs, [runId]: next } }
-    })
-
-    // An extension paused the turn to ask the user something. Blocking methods
-    // become a pending prompt card; `notify` is a transient, no-response notice.
-    if (type === 'extension_ui_request' && e.ui) {
-      const ui = e.ui
-      if (ui.method === 'notify') {
-        const notice: Notice = { id: ui.id, message: ui.message, kind: ui.notifyType ?? 'info' }
-        set((s) => ({ notices: [...s.notices, notice] }))
+    // Split the batch once: text/thinking accumulate, events are folded in order.
+    let text = ''
+    let thinking = ''
+    const events: AgentStreamEvent[] = []
+    let isWork = false
+    for (const it of b.items) {
+      if (it.kind === 'text') {
+        text += it.text
+        isWork = true
+      } else if (it.kind === 'thinking') {
+        thinking += it.text
+        isWork = true
       } else {
-        const run = get().runs[runId]
-        const pending: PendingPrompt = {
-          id: ui.id,
-          runId,
-          cwd: e.cwd ?? run?.cwd ?? '',
-          sessionPath: e.sessionPath ?? run?.sessionPath ?? null,
-          request: ui
+        events.push(it.event)
+        // Only genuine output may create a run. Trailing/meta events —
+        // display-only extension status, late responses — must NOT resurrect a
+        // run that finalizeRun already retired, or the working indicator would
+        // restart with no agent_end ever coming. An interactive prompt counts as
+        // work: the turn paused mid-flight to ask the user something.
+        if (
+          it.event.type === 'tool_execution_start' ||
+          it.event.type === 'tool_execution_update' ||
+          it.event.type === 'extension_ui_request'
+        ) {
+          isWork = true
         }
-        set((s) => ({ pendingPrompts: { ...s.pendingPrompts, [ui.id]: pending } }))
       }
     }
 
-    // The turn ended (cleanly, by error, or process exit) — any prompt it was
-    // blocked on can no longer be answered, so drop this run's pending prompts.
-    if (type === 'agent_end' || type === 'error' || type === 'agent_exit') {
+    // One commit for the whole batch. `runs` and `streams` are written
+    // independently so a pure-text batch leaves the `runs` identity untouched and
+    // only the live row re-renders.
+    set((s) => {
+      const existing = s.runs[runId]
+      if (!existing && !isWork) return {}
+
+      const next: RunMeta = existing
+        ? { ...existing }
+        : {
+            runId,
+            harnessId: b.harnessId,
+            cwd: b.cwd,
+            sessionPath: b.sessionPath ?? null,
+            status: 'running',
+            startedAt: Date.now()
+          }
+      if (b.cwd && !next.cwd) next.cwd = b.cwd
+      if (b.sessionPath && !next.sessionPath) next.sessionPath = b.sessionPath
+      if (isWork && isActive(next.status)) next.status = 'running'
+      for (const e of events) applyEventToRun(next, e)
+
+      const patch: Partial<State> = {}
+      if (!existing || !shallowEqualMeta(existing, next)) {
+        patch.runs = { ...s.runs, [runId]: next }
+      }
+      if (text || thinking) {
+        const prevStream = s.streams[runId] ?? EMPTY_STREAM
+        patch.streams = {
+          ...s.streams,
+          [runId]: {
+            text: text ? prevStream.text + text : prevStream.text,
+            thinking: thinking ? prevStream.thinking + thinking : prevStream.thinking,
+            rev: prevStream.rev + 1
+          }
+        }
+      }
+      return patch
+    })
+
+    if (gap) void get().resyncRuns()
+
+    // The tool stream names the file the agent is writing *before* the write lands,
+    // so the tree can flash immediately; the filesystem watcher independently
+    // refreshes the content a moment later.
+    const edited = collectEditedPaths(events, get().runs[runId]?.cwd ?? b.cwd)
+    if (edited.length) {
       set((s) => {
-        const kept = Object.entries(s.pendingPrompts).filter(([, p]) => p.runId !== runId)
-        if (kept.length === Object.keys(s.pendingPrompts).length) return {}
-        return { pendingPrompts: Object.fromEntries(kept) }
+        const now = Date.now()
+        const agentEdits = { ...s.agentEdits }
+        for (const p of edited) agentEdits[p] = now
+        // Keep the map from growing without bound over a long session.
+        const keys = Object.keys(agentEdits)
+        if (keys.length > 200) {
+          for (const k of keys) if (now - agentEdits[k] > AGENT_EDIT_TTL_MS) delete agentEdits[k]
+        }
+        return { agentEdits }
       })
     }
 
-    if (type === 'session_bound' && e.sessionPath) {
+    // Stats are applied whether or not the run still exists: the authoritative
+    // end-of-turn totals arrive just after `agent_end`, by which point the run may
+    // already have been retired.
+    const statsPatches = events.filter((e) => e.type === 'stats')
+    if (statsPatches.length) {
+      set((s) => {
+        let live = s.statsLive[runId] ?? {}
+        let final: StatsPatch | null = null
+        for (const e of statsPatches) {
+          if (e.type !== 'stats') continue
+          live = mergeStats(live, e.patch)
+          if (e.patch.final) final = live
+        }
+        const patch: Partial<State> = { statsLive: { ...s.statsLive, [runId]: live } }
+        const sessionPath = b.sessionPath ?? s.runs[runId]?.sessionPath
+        if (final && sessionPath) {
+          patch.sessionStats = {
+            ...s.sessionStats,
+            [sessionPath]: mergeStats(s.sessionStats[sessionPath] ?? {}, final)
+          }
+        }
+        return patch
+      })
+    }
+
+    // Side effects, in stream order.
+    let finalize = false
+    let boundPath: string | null = null
+    for (const e of events) {
+      switch (e.type) {
+        case 'extension_ui_request': {
+          // Blocking methods become a pending prompt card; `notify` is a
+          // transient, no-response notice.
+          const ui = e.ui
+          if (ui.method === 'notify') {
+            set((s) => ({
+              notices: [
+                ...s.notices,
+                { id: ui.id, message: ui.message, kind: ui.notifyType ?? 'info' }
+              ]
+            }))
+          } else {
+            const run = get().runs[runId]
+            const pending: PendingPrompt = {
+              id: ui.id,
+              runId,
+              cwd: b.cwd || run?.cwd || '',
+              sessionPath: b.sessionPath ?? run?.sessionPath ?? null,
+              request: ui
+            }
+            set((s) => ({ pendingPrompts: { ...s.pendingPrompts, [ui.id]: pending } }))
+          }
+          break
+        }
+
+        case 'ui_cancelled':
+          // The prompt timed out harness-side; it can no longer be answered.
+          set((s) => {
+            if (!s.pendingPrompts[e.id]) return {}
+            const rest = { ...s.pendingPrompts }
+            delete rest[e.id]
+            return { pendingPrompts: rest }
+          })
+          break
+
+        case 'stream_error':
+          set((s) => ({
+            notices: [
+              ...s.notices,
+              { id: `err-${Date.now()}-${s.notices.length}`, message: e.reason, kind: 'error' }
+            ]
+          }))
+          break
+
+        case 'prompt_rejected':
+          // The harness refused the prompt, so it never reached the agent. Take the
+          // optimistic bubble back off the thread and hand the text back to the
+          // composer — losing what someone typed is the worst possible outcome here.
+          set((s) => {
+            const notices = [
+              ...s.notices,
+              { id: `err-${Date.now()}-${s.notices.length}`, message: e.reason, kind: 'error' as const }
+            ]
+            if (!s.session) return { notices }
+            const messages = [...s.session.messages]
+            let restored = ''
+            while (messages.length && messages[messages.length - 1].id.startsWith('local-')) {
+              restored = messages.pop()?.text ?? restored
+            }
+            return {
+              notices,
+              session: { ...s.session, messages },
+              draftRestore: restored || s.draftRestore
+            }
+          })
+          break
+
+        case 'session_bound':
+          boundPath = e.sessionPath
+          break
+
+        case 'agent_end':
+        case 'agent_settled':
+          finalize = true
+          break
+
+        case 'session_info_changed':
+          // The harness renamed the session; reflect it in the header.
+          if (e.name) {
+            set((s) =>
+              s.session ? { session: { ...s.session, name: e.name } } : {}
+            )
+          }
+          break
+
+        case 'error': {
+          // Surface full detail (reason + stderr tail) inline on the viewed session.
+          const detail = `${e.errorReason}${e.stderrTail ? `\n\n${e.stderrTail}` : ''}`
+          set((s) => {
+            const run = s.runs[runId]
+            const viewing =
+              run &&
+              (samePath(run.sessionPath, s.selectedSessionPath) ||
+                (s.selectedSessionPath === null && samePath(run.cwd, s.selectedCwd)))
+            if (!viewing || !s.session) return {}
+            return {
+              session: {
+                ...s.session,
+                messages: [
+                  ...s.session.messages,
+                  { id: `sys-${Date.now()}`, role: 'system', text: `⚠ ${detail}` }
+                ]
+              }
+            }
+          })
+          break
+        }
+
+        default:
+          break
+      }
+
+      // The turn ended (cleanly, by error, or process exit) — any prompt it was
+      // blocked on can no longer be answered.
+      if (e.type === 'agent_end' || e.type === 'error' || e.type === 'agent_exit') {
+        set((s) => {
+          const kept = Object.entries(s.pendingPrompts).filter(([, p]) => p.runId !== runId)
+          if (kept.length === Object.keys(s.pendingPrompts).length) return {}
+          return { pendingPrompts: Object.fromEntries(kept) }
+        })
+      }
+    }
+
+    if (boundPath) {
       // The harness revealed the new session's file path (and it now exists on
       // disk). Navigate to it immediately using this run's own cwd — more robust
       // than matching the file's header cwd — then load details + refresh the
       // sidebar via applySessionUpdate.
-      const path = e.sessionPath
       const st = get()
       const run = st.runs[runId]
       if (st.selectedSessionPath === null && run && samePath(st.selectedCwd, run.cwd)) {
-        set({ selectedSessionPath: path })
+        set({ selectedSessionPath: boundPath })
       }
-      void get().applySessionUpdate(path)
+      void get().applySessionUpdate(boundPath)
     }
 
-    if (type === 'agent_end') {
+    if (finalize) {
       // Deterministically swap the streamed text for the authoritative session
       // and retire the run — rather than racing the file watcher / a timer,
       // which could drop the text before the reload repaints it.
       void get().finalizeRun(runId)
-    }
-
-    if (type === 'error') {
-      // Surface full detail (reason + stderr tail) inline on the viewed session.
-      const detail = `${e.errorReason ?? 'Run failed.'}${e.stderrTail ? `\n\n${e.stderrTail}` : ''}`
-      set((s) => {
-        const run = s.runs[runId]
-        const viewing =
-          run &&
-          (samePath(run.sessionPath, s.selectedSessionPath) ||
-            (s.selectedSessionPath === null && samePath(run.cwd, s.selectedCwd)))
-        if (!viewing || !s.session) return {}
-        return {
-          session: {
-            ...s.session,
-            messages: [
-              ...s.session.messages,
-              { id: `sys-${Date.now()}`, role: 'system', text: `⚠ ${detail}` }
-            ]
-          }
-        }
-      })
     }
   },
 
@@ -926,7 +1602,13 @@ export const useStore = create<State>((set, get) => {
     const { view } = get()
     if (view === 'dashboard') return
     const run = get().runs[runId]
-    if (!run || run.status !== 'finalizing') return
+    if (!run) return
+    // Called only from `agent_end` / `agent_settled`. `finalizing` means the whole
+    // run is done; `running` at this point means a queued turn just ended and
+    // another follows, so the finished turn is swapped in for the authoritative
+    // version but the run stays alive.
+    const continuing = run.status === 'running'
+    if (!continuing && run.status !== 'finalizing') return
 
     // Without a known session path (a brand-new chat not yet adopted) we can't
     // load the authoritative file; leave the settled stream visible and let the
@@ -944,14 +1626,15 @@ export const useStore = create<State>((set, get) => {
     // Only retire the run (and swap in the authoritative session) once the reply
     // is actually present (last message is an assistant turn). Until then the
     // streamed text stays on screen — it is never dropped before its replacement
-    // exists. The harness writes the message just before/around agent_end, so a
-    // couple of short retries cover the file-flush race without trusting the
-    // watcher alone.
+    // exists. The harness appends the message synchronously around agent_end, so
+    // one retry covers the flush race; beyond that the session watcher's own
+    // `replyLanded` reconciliation retires the run, rather than us re-parsing the
+    // whole file another six times.
     const last = session?.messages[session.messages.length - 1]
     const replyLanded = !!session && !!last && last.role === 'assistant'
 
     if (!replyLanded) {
-      if (attempt < 6) setTimeout(() => void get().finalizeRun(runId, attempt + 1), 500)
+      if (attempt < 1) setTimeout(() => void get().finalizeRun(runId, attempt + 1), 750)
       return
     }
 
@@ -960,12 +1643,43 @@ export const useStore = create<State>((set, get) => {
       samePath(st.selectedSessionPath, sessionPath) ||
       (st.selectedSessionPath === null && samePath(st.selectedCwd, run.cwd))
 
+    if (!continuing) lastSeq.delete(runId)
     set((s) => {
       const runs = { ...s.runs }
-      delete runs[runId]
-      return isViewed
-        ? { runs, session: session as SessionDetail, selectedSessionPath: sessionPath }
-        : { runs }
+      const streams = { ...s.streams }
+      const statsLive = { ...s.statsLive }
+      const live = statsLive[runId]
+      if (continuing) {
+        // A queued turn follows. Keep the run, but reset its buffer so the next
+        // turn's text doesn't render appended to the one we just settled.
+        streams[runId] = { text: '', thinking: '', rev: (s.streams[runId]?.rev ?? 0) + 1 }
+      } else {
+        delete runs[runId]
+        delete streams[runId]
+        delete statsLive[runId]
+      }
+
+      // The file's own tokens/sec is derived from record timestamps, which is
+      // coarse. We just watched this turn happen, so prefer the rate we measured
+      // (or the provider reported) for its last assistant message.
+      let authoritative = session as SessionDetail
+      if (live?.tokPerSec && authoritative.messages.length) {
+        const messages = [...authoritative.messages]
+        for (let i = messages.length - 1; i >= 0; i--) {
+          if (messages[i].role === 'assistant') {
+            messages[i] = { ...messages[i], tps: live.tokPerSec, tpsApprox: live.approx }
+            break
+          }
+        }
+        authoritative = { ...authoritative, messages }
+      }
+
+      const patch: Partial<State> = { runs, streams, statsLive }
+      if (isViewed) {
+        patch.session = authoritative
+        patch.selectedSessionPath = sessionPath
+      }
+      return patch
     })
   },
 
@@ -974,12 +1688,16 @@ export const useStore = create<State>((set, get) => {
     try {
       const snaps = await heph.agentListRuns()
       set((s) => {
-        const runs: Record<string, RunState> = {}
+        const runs: Record<string, RunMeta> = {}
+        const streams: Record<string, RunStream> = {}
         // Preserve local transient runs: finalizing (awaiting authoritative
         // reload) and error (shown inline). These take precedence over whatever
         // the registry reports for the same id.
         for (const [id, r] of Object.entries(s.runs)) {
-          if (r.status === 'finalizing' || r.status === 'error') runs[id] = r
+          if (r.status === 'finalizing' || r.status === 'error') {
+            runs[id] = r
+            if (s.streams[id]) streams[id] = s.streams[id]
+          }
         }
         // Adopt only *active* runs from the source of truth. Inactive (idle)
         // registry runs are dropped, and local active runs the registry no longer
@@ -987,15 +1705,17 @@ export const useStore = create<State>((set, get) => {
         for (const snap of snaps) {
           if (!isActive(snap.status)) continue
           if (runs[snap.runId]) continue
-          const fresh = snapshotToRun(snap)
-          const prev = s.runs[snap.runId]
-          if (prev) {
-            // Keep whichever accumulation is longer — we may have streamed past
-            // the bounded snapshot tail, or the snapshot may be ahead of us.
-            if (prev.text.length >= fresh.text.length) fresh.text = prev.text
-            if (prev.thinking.length >= fresh.thinking.length) fresh.thinking = prev.thinking
+          runs[snap.runId] = snapshotToMeta(snap)
+          // Keep whichever accumulation is longer — we may have streamed past the
+          // bounded snapshot tail, or the snapshot may be ahead of us (e.g. after
+          // a renderer reload, where we have no local copy at all).
+          const prev = s.streams[snap.runId] ?? EMPTY_STREAM
+          streams[snap.runId] = {
+            text: prev.text.length >= snap.streamTail.length ? prev.text : snap.streamTail,
+            thinking:
+              prev.thinking.length >= snap.thinkingTail.length ? prev.thinking : snap.thinkingTail,
+            rev: prev.rev + 1
           }
-          runs[snap.runId] = fresh
         }
         // Rehydrate any in-flight prompt so a reloaded renderer isn't stranded
         // on a paused turn it can no longer answer.
@@ -1012,7 +1732,7 @@ export const useStore = create<State>((set, get) => {
             }
           }
         }
-        return { runs, pendingPrompts }
+        return { runs, streams, pendingPrompts }
       })
     } catch {
       // ignore — best effort

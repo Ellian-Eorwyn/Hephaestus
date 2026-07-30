@@ -4,6 +4,7 @@ import type {
   SessionRecord,
   ThreadMessage,
   SessionDetail,
+  SessionSummary,
   UsageTotals,
   Usage,
   RawMessage
@@ -43,11 +44,14 @@ export function encodeCwd(cwd: string): string {
   return `--${inner}--`
 }
 
-/** Parse a .jsonl session file into raw records. Tolerant of malformed lines. */
-export async function readRecords(filePath: string): Promise<SessionRecord[]> {
-  const raw = await fs.readFile(filePath, 'utf8')
+/**
+ * Parse newline-delimited JSON records out of a text chunk. Tolerant of malformed
+ * lines: the harness appends while we read, so a torn trailing line is normal and
+ * simply skipped — the next read picks it up complete.
+ */
+export function parseRecords(text: string): SessionRecord[] {
   const records: SessionRecord[] = []
-  for (const line of raw.split('\n')) {
+  for (const line of text.split('\n')) {
     const trimmed = line.trim()
     if (!trimmed) continue
     try {
@@ -57,6 +61,11 @@ export async function readRecords(filePath: string): Promise<SessionRecord[]> {
     }
   }
   return records
+}
+
+/** Parse a .jsonl session file into raw records. */
+export async function readRecords(filePath: string): Promise<SessionRecord[]> {
+  return parseRecords(await fs.readFile(filePath, 'utf8'))
 }
 
 /**
@@ -112,31 +121,43 @@ function blockText(message: RawMessage): {
   return { text, thinking, toolCalls }
 }
 
-/** Convert raw records into normalized UI messages. */
-export function toThread(records: SessionRecord[]): ThreadMessage[] {
+/**
+ * Convert raw records into normalized UI messages.
+ *
+ * `idPrefix` seeds the fallback id for records the harness wrote without one.
+ * It must be stable across re-parses of the same file: these ids become React
+ * keys, so a fresh random id per parse would unmount and re-render the row (and
+ * re-parse its markdown, and jump the scroll position) on every watcher tick.
+ */
+export function toThread(records: SessionRecord[], idPrefix = 'rec'): ThreadMessage[] {
   const thread = resolveLeafThread(records)
   const messages: ThreadMessage[] = []
-  // Timestamp (ms) of the previous record in the thread, used to estimate the
-  // response time of each assistant turn for the tokens/sec stat.
+  let index = 0
+  // Timestamp (ms) and id of the previous record in the thread, used to estimate
+  // the response time of each assistant turn for the tokens/sec stat.
   let prevTs: number | null = null
+  let prevId: string | undefined
   for (const r of thread) {
     const curTs = r.timestamp ? Date.parse(r.timestamp) : NaN
     if (r.type !== 'message' || !r.message) {
       if (!Number.isNaN(curTs)) prevTs = curTs
+      prevId = r.id ?? prevId
       continue
     }
+    const fallbackId = `${idPrefix}#${index++}`
     const m = r.message
     if (m.role === 'toolResult') {
       const text = (m.content ?? [])
         .map((b) => (b.type === 'text' ? (b as { text: string }).text : ''))
         .join('')
       messages.push({
-        id: r.id ?? cryptoId(),
+        id: r.id ?? fallbackId,
         role: 'toolResult',
         timestamp: r.timestamp,
         toolResult: { toolCallId: m.toolCallId, toolName: m.toolName, isError: m.isError, text }
       })
       if (!Number.isNaN(curTs)) prevTs = curTs
+      prevId = r.id ?? prevId
       continue
     }
     const { text, thinking, toolCalls } = blockText(m)
@@ -152,18 +173,26 @@ export function toThread(records: SessionRecord[]): ThreadMessage[] {
 
     // Per-turn stats: effective output tokens/sec = output ÷ response time, where
     // response time is from the prior record to this assistant message.
+    //
+    // Only meaningful when the previous record is this message's direct parent.
+    // Otherwise the gap spans something else entirely — a tool round-trip, or a
+    // jump across a fork — and dividing by it reports a throughput the model never
+    // achieved. This is always an estimate derived from record timestamps, so it's
+    // labelled approximate in the UI; a live run replaces it with a measured (or
+    // provider-reported) figure.
     let outputTokens: number | undefined
     let tps: number | undefined
     if (m.role === 'assistant') {
       outputTokens = m.usage?.output
-      if (outputTokens && prevTs != null && !Number.isNaN(curTs)) {
+      const adjacent = prevId !== undefined && r.parentId === prevId
+      if (outputTokens && adjacent && prevTs != null && !Number.isNaN(curTs)) {
         const seconds = (curTs - prevTs) / 1000
         if (seconds > 0.05 && seconds < 3600) tps = outputTokens / seconds
       }
     }
 
     messages.push({
-      id: r.id ?? cryptoId(),
+      id: r.id ?? fallbackId,
       role: m.role,
       timestamp: r.timestamp,
       text: displayText || undefined,
@@ -173,16 +202,16 @@ export function toThread(records: SessionRecord[]): ThreadMessage[] {
       model: m.responseModel ?? m.model,
       attachedFile,
       outputTokens,
-      tps
+      tps,
+      // Derived from record timestamps, never a reported figure.
+      tpsApprox: tps === undefined ? undefined : true
     })
     if (!Number.isNaN(curTs)) prevTs = curTs
+    prevId = r.id ?? prevId
   }
   return messages
 }
 
-function cryptoId(): string {
-  return Math.random().toString(36).slice(2, 10)
-}
 
 const ZERO: UsageTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: 0 }
 
@@ -222,10 +251,23 @@ export interface BuildOptions {
   defaultContextWindow?: number | null
 }
 
-export async function buildSessionDetail(filePath: string, opts: BuildOptions = {}): Promise<SessionDetail> {
-  const records = await readRecords(filePath)
+export async function buildSessionDetail(
+  filePath: string,
+  opts: BuildOptions = {}
+): Promise<SessionDetail> {
+  return buildSessionDetailFromRecords(filePath, await readRecords(filePath), opts)
+}
+
+/** The pure half of `buildSessionDetail`, for callers that already hold the records. */
+export function buildSessionDetailFromRecords(
+  filePath: string,
+  records: SessionRecord[],
+  opts: BuildOptions = {}
+): SessionDetail {
   const header = records.find((r) => r.type === 'session') ?? { type: 'session' }
-  const messages = toThread(records)
+  // Derive the fallback-id prefix from the file so ids stay identical across
+  // reloads of the same session (and can't collide between sessions).
+  const messages = toThread(records, path.basename(filePath, '.jsonl'))
   const usage = sumUsage(messages)
 
   // Determine context window from the most recent assistant model.
@@ -249,29 +291,68 @@ export async function buildSessionDetail(filePath: string, opts: BuildOptions = 
 }
 
 /** Lightweight summary parse (header + first user message + totals) for listings. */
-export async function summarize(filePath: string) {
-  const records = await readRecords(filePath)
-  const header = records.find((r) => r.type === 'session')
-  const id = header?.id ?? path.basename(filePath).replace(/\.jsonl$/, '')
-  const timestamp = header?.timestamp ?? ''
-  // The header carries the authoritative working directory (the folder name is a
-  // lossy encoding that mangles real hyphens), so prefer it for the project cwd.
-  const cwd = header?.cwd ?? ''
+export async function summarize(filePath: string): Promise<SessionSummary> {
+  return summarizeRecords(filePath, await readRecords(filePath))
+}
 
-  let title = '(empty session)'
-  let messageCount = 0
-  let totalTokens = 0
-  for (const r of records) {
-    if (r.type !== 'message' || !r.message) continue
-    messageCount++
-    const m = r.message
-    if (m.usage?.totalTokens) totalTokens += m.usage.totalTokens
-    if (title === '(empty session)' && m.role === 'user') {
-      const firstText = (m.content ?? []).find((b) => b.type === 'text') as { text?: string } | undefined
-      if (firstText?.text) title = truncate(parseViewingContext(firstText.text).text, 80)
-    }
+const EMPTY_TITLE = '(empty session)'
+
+/**
+ * Running totals for a session summary. Every field is cumulative, so a caller
+ * that already summarized the first N records can fold in only what was appended
+ * instead of walking the whole session again on each change.
+ */
+export interface SummaryAccum {
+  messageCount: number
+  totalTokens: number
+  title: string
+}
+
+export function newSummaryAccum(): SummaryAccum {
+  return { messageCount: 0, totalTokens: 0, title: EMPTY_TITLE }
+}
+
+/** Fold one record into a running summary. */
+export function foldSummaryRecord(acc: SummaryAccum, r: SessionRecord): void {
+  if (r.type !== 'message' || !r.message) return
+  acc.messageCount++
+  const m = r.message
+  if (m.usage?.totalTokens) acc.totalTokens += m.usage.totalTokens
+  if (acc.title === EMPTY_TITLE && m.role === 'user') {
+    const firstText = (m.content ?? []).find((b) => b.type === 'text') as
+      | { text?: string }
+      | undefined
+    if (firstText?.text) acc.title = truncate(parseViewingContext(firstText.text).text, 80)
   }
-  return { path: filePath, id, timestamp, title, messageCount, totalTokens, cwd }
+}
+
+export function summaryFromAccum(
+  filePath: string,
+  header: SessionRecord | undefined,
+  acc: SummaryAccum
+): SessionSummary {
+  return {
+    path: filePath,
+    id: header?.id ?? path.basename(filePath).replace(/\.jsonl$/, ''),
+    timestamp: header?.timestamp ?? '',
+    title: acc.title,
+    messageCount: acc.messageCount,
+    totalTokens: acc.totalTokens,
+    // The header carries the authoritative working directory (the folder name is a
+    // lossy encoding that mangles real hyphens), so prefer it for the project cwd.
+    cwd: header?.cwd ?? ''
+  }
+}
+
+/** The pure half of `summarize`, for callers that already hold the records. */
+export function summarizeRecords(filePath: string, records: SessionRecord[]): SessionSummary {
+  const acc = newSummaryAccum()
+  for (const r of records) foldSummaryRecord(acc, r)
+  return summaryFromAccum(
+    filePath,
+    records.find((r) => r.type === 'session'),
+    acc
+  )
 }
 
 function truncate(s: string, n: number): string {

@@ -1,19 +1,34 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import * as XLSX from 'xlsx'
-import type { FileNode, FileContent, SheetData } from '@shared/types'
+import type {
+  FileNode,
+  FileContent,
+  FileChange,
+  FileChangeType,
+  ProjectChangePayload,
+  SheetData
+} from '@shared/types'
 
 import chokidar from 'chokidar'
 
 const IGNORE = new Set(['.git', 'node_modules', '.DS_Store', '.venv', 'venv', '__pycache__', 'dist', 'out', '.next'])
 
 /**
- * Single chokidar `ignored` predicate covering noisy dirs and dotfiles (except
- * the few we surface in the tree). A function is more reliable than a mix of
- * regex + globs, and it sees both the absolute path and the dirent.
+ * chokidar `ignored` predicate covering noisy dirs and dotfiles (except the few we
+ * surface in the tree).
+ *
+ * Only segments *below the watched root* are tested. Testing the absolute path
+ * meant a project living under any dot-directory or any `dist`/`out` ancestor —
+ * `~/.config/foo`, say, or an Obsidian vault under `~/.obsidian` — matched its own
+ * root and silently received zero events, so nothing in it ever updated live.
  */
-function isIgnoredPath(p: string): boolean {
-  for (const seg of p.split(path.sep)) {
+function isIgnoredPath(root: string, p: string): boolean {
+  const rel = path.relative(root, p)
+  if (!rel) return false
+  // Outside the root entirely: nothing we care about.
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return true
+  for (const seg of rel.split(path.sep)) {
     if (!seg) continue
     if (IGNORE.has(seg)) return true
     if (seg.startsWith('.') && seg !== '.gitignore') return true
@@ -23,6 +38,16 @@ function isIgnoredPath(p: string): boolean {
 
 /** Depth chokidar/readDir descend into a project before stopping. */
 const WATCH_DEPTH = 8
+/** Coalescing window for filesystem bursts. */
+const CHANGE_DEBOUNCE_MS = 60
+/** Beyond this many distinct paths in one window we stop enumerating and flag overflow. */
+const MAX_CHANGES = 200
+/**
+ * How many projects to keep watched. Background runs in other projects still need
+ * their trees fresh, but an unbounded map meant every project ever opened kept a
+ * recursive watcher alive until the app quit.
+ */
+const MAX_WATCHERS = 3
 
 const CODE_LANGS: Record<string, string> = {
   '.ts': 'typescript',
@@ -67,10 +92,20 @@ const MAX_SHEET_BYTES = 15_000_000 // 15MB cap for spreadsheet parsing
 const MAX_ROWS = 1000
 const MAX_COLS = 60
 
+/** A watched project and the change burst currently accumulating for it. */
+interface ProjectWatch {
+  watcher: chokidar.FSWatcher
+  onChange: (payload: ProjectChangePayload) => void
+  pending: Map<string, FileChange>
+  timer: NodeJS.Timeout | null
+  overflow: boolean
+  usedAt: number
+}
+
 export class FileService {
   // One watcher per project cwd so concurrent/background runs all keep their
   // file trees fresh — not a single watcher tied to the visible selection.
-  private watchers = new Map<string, chokidar.FSWatcher>()
+  private watchers = new Map<string, ProjectWatch>()
 
   /** Build a file tree for the given cwd, recursing up to WATCH_DEPTH levels. */
   async listFiles(cwd: string): Promise<FileNode[]> {
@@ -78,36 +113,92 @@ export class FileService {
   }
 
   /**
-   * Watch a project directory, debouncing change bursts. Idempotent per cwd:
-   * calling again for an already-watched cwd is a no-op (the existing watcher's
-   * callback is reused), so re-selecting a project never tears down a watcher
-   * that another active run depends on.
+   * Watch a project directory, coalescing change bursts into a single payload that
+   * names the paths involved.
+   *
+   * Re-watching an already-watched cwd refreshes its position in the LRU and
+   * adopts the new callback rather than tearing the watcher down, so re-selecting
+   * a project never disturbs a watcher a background run depends on.
    */
-  watch(cwd: string, onChange: () => void): void {
+  watch(cwd: string, onChange: (payload: ProjectChangePayload) => void): void {
     const key = path.resolve(cwd)
-    if (this.watchers.has(key)) return
-
-    // Coalesce rapid bursts but stay snappy. We deliberately do NOT use
-    // awaitWriteFinish: the tree only needs filenames, so a file should appear
-    // the instant it's created (fsevents on macOS) rather than after its content
-    // settles.
-    let timeout: NodeJS.Timeout | null = null
-    const notify = () => {
-      if (timeout) clearTimeout(timeout)
-      timeout = setTimeout(() => onChange(), 60)
+    const existing = this.watchers.get(key)
+    if (existing) {
+      existing.onChange = onChange
+      existing.usedAt = Date.now()
+      return
     }
 
+    // Coalesce rapid bursts but stay snappy. We deliberately do NOT use
+    // awaitWriteFinish: a file should surface the instant it's created rather than
+    // after its content settles, and the stat we attach lets the renderer decide
+    // whether a re-read is actually needed.
     const watcher = chokidar.watch(key, {
-      ignored: (p: string) => isIgnoredPath(p),
+      ignored: (p: string) => isIgnoredPath(key, p),
       ignoreInitial: true,
+      alwaysStat: true,
       depth: WATCH_DEPTH
     })
-    watcher.on('all', notify)
-    this.watchers.set(key, watcher)
+
+    const entry: ProjectWatch = {
+      watcher,
+      onChange,
+      pending: new Map(),
+      timer: null,
+      overflow: false,
+      usedAt: Date.now()
+    }
+
+    watcher.on('all', (event: string, changedPath: string, stats?: { size: number; mtimeMs: number }) => {
+      if (!isFileChangeType(event)) return
+      // chokidar reports an `addDir` for the watched root itself even with
+      // ignoreInitial, which would make the first edit in every project look like
+      // a structural change and force a needless full re-listing.
+      if (changedPath === key && (event === 'addDir' || event === 'unlinkDir')) return
+      if (entry.pending.size >= MAX_CHANGES && !entry.pending.has(changedPath)) {
+        // A mass event (install, branch switch). Stop enumerating; the renderer
+        // treats overflow as "re-check everything".
+        entry.overflow = true
+      } else {
+        entry.pending.set(changedPath, {
+          type: event,
+          path: changedPath,
+          size: stats?.size,
+          mtimeMs: stats?.mtimeMs
+        })
+      }
+      if (entry.timer) clearTimeout(entry.timer)
+      entry.timer = setTimeout(() => {
+        entry.timer = null
+        const changes = [...entry.pending.values()]
+        const overflow = entry.overflow
+        entry.pending.clear()
+        entry.overflow = false
+        if (changes.length || overflow) entry.onChange({ cwd: key, changes, overflow })
+      }, CHANGE_DEBOUNCE_MS)
+    })
+
+    this.watchers.set(key, entry)
+    this.evictWatchers()
+  }
+
+  /** Close the least-recently-selected watchers once we're over the cap. */
+  private evictWatchers(): void {
+    if (this.watchers.size <= MAX_WATCHERS) return
+    const byAge = [...this.watchers.entries()].sort((a, b) => a[1].usedAt - b[1].usedAt)
+    for (const [key, entry] of byAge) {
+      if (this.watchers.size <= MAX_WATCHERS) break
+      if (entry.timer) clearTimeout(entry.timer)
+      void entry.watcher.close()
+      this.watchers.delete(key)
+    }
   }
 
   dispose(): void {
-    for (const w of this.watchers.values()) void w.close()
+    for (const w of this.watchers.values()) {
+      if (w.timer) clearTimeout(w.timer)
+      void w.watcher.close()
+    }
     this.watchers.clear()
   }
 
@@ -145,39 +236,49 @@ export class FileService {
     const ext = path.extname(filePath).toLowerCase()
     const stat = await fs.stat(filePath)
     const truncated = stat.size > MAX_BYTES
+    // Stamp every result so a watcher event can be compared against what's on
+    // screen and skipped when the bytes are unchanged.
+    const at = { size: stat.size, mtimeMs: stat.mtimeMs }
 
     if (ext === '.json' && stat.size <= MAX_SHEET_BYTES) {
       const sheets = await this.readJsonArray(filePath)
       if (sheets) {
-        return { path: filePath, kind: 'spreadsheet', content: '', sheets, truncated: false }
+        return { path: filePath, kind: 'spreadsheet', content: '', sheets, truncated: false, ...at }
       }
     }
 
     if (JSONL_EXT.has(ext)) {
       if (stat.size > MAX_SHEET_BYTES) {
-        return { path: filePath, kind: 'binary', content: '', truncated: true }
+        return { path: filePath, kind: 'binary', content: '', truncated: true, ...at }
       }
       const sheets = await this.readJsonl(filePath)
-      return { path: filePath, kind: 'spreadsheet', content: '', sheets, truncated: false }
+      return { path: filePath, kind: 'spreadsheet', content: '', sheets, truncated: false, ...at }
     }
 
     if (SPREADSHEET_EXT.has(ext)) {
       if (stat.size > MAX_SHEET_BYTES) {
-        return { path: filePath, kind: 'binary', content: '', truncated: true }
+        return { path: filePath, kind: 'binary', content: '', truncated: true, ...at }
       }
       const sheets = await this.readSpreadsheet(filePath)
-      return { path: filePath, kind: 'spreadsheet', content: '', sheets, truncated: false }
+      return { path: filePath, kind: 'spreadsheet', content: '', sheets, truncated: false, ...at }
     }
 
     if (MARKDOWN_EXT.has(ext)) {
       const content = await this.readText(filePath, truncated)
-      return { path: filePath, kind: 'markdown', content, truncated }
+      return { path: filePath, kind: 'markdown', content, truncated, ...at }
     }
     if (CODE_LANGS[ext] || isProbablyText(filePath)) {
       const content = await this.readText(filePath, truncated)
-      return { path: filePath, kind: 'code', language: CODE_LANGS[ext] ?? 'text', content, truncated }
+      return {
+        path: filePath,
+        kind: 'code',
+        language: CODE_LANGS[ext] ?? 'text',
+        content,
+        truncated,
+        ...at
+      }
     }
-    return { path: filePath, kind: 'binary', content: '', truncated: false }
+    return { path: filePath, kind: 'binary', content: '', truncated: false, ...at }
   }
 
   /**
@@ -339,6 +440,11 @@ function jsonlCellToString(c: unknown): string {
     }
   }
   return String(c)
+}
+
+const FILE_CHANGE_TYPES = new Set<string>(['add', 'change', 'unlink', 'addDir', 'unlinkDir'])
+function isFileChangeType(event: string): event is FileChangeType {
+  return FILE_CHANGE_TYPES.has(event)
 }
 
 function isProbablyText(filePath: string): boolean {

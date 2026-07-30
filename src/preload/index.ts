@@ -1,6 +1,12 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { IPC } from '@shared/ipc'
-import type { HephApi, AgentEvent, InstallEvent } from '@shared/types'
+import type {
+  HephApi,
+  AgentBatch,
+  InstallEvent,
+  ProjectChangePayload,
+  SessionUpdatePayload
+} from '@shared/types'
 
 const api: HephApi = {
   // Resolve the absolute filesystem path of a dropped File. Electron 32+ removed
@@ -31,21 +37,22 @@ const api: HephApi = {
   agentSend: (input) => ipcRenderer.invoke(IPC.agentSend, input),
   agentRespond: (input) => ipcRenderer.invoke(IPC.agentRespond, input),
   agentAbort: (runId) => ipcRenderer.invoke(IPC.agentAbort, runId),
+  agentAbortRetry: (runId) => ipcRenderer.invoke(IPC.agentAbortRetry, runId),
   agentClose: (runId) => ipcRenderer.invoke(IPC.agentClose, runId),
   agentListRuns: () => ipcRenderer.invoke(IPC.agentListRuns),
 
   onSessionUpdated: (cb) => {
-    const listener = (_e: unknown, payload: { harnessId: string; path: string }) => cb(payload)
+    const listener = (_e: unknown, payload: SessionUpdatePayload) => cb(payload)
     ipcRenderer.on(IPC.evtSessionUpdated, listener)
     return () => ipcRenderer.removeListener(IPC.evtSessionUpdated, listener)
   },
-  onAgentEvent: (cb) => {
-    const listener = (_e: unknown, event: AgentEvent) => cb(event)
-    ipcRenderer.on(IPC.evtAgentEvent, listener)
-    return () => ipcRenderer.removeListener(IPC.evtAgentEvent, listener)
+  onAgentBatch: (cb) => {
+    const listener = (_e: unknown, batch: AgentBatch) => cb(batch)
+    ipcRenderer.on(IPC.evtAgentBatch, listener)
+    return () => ipcRenderer.removeListener(IPC.evtAgentBatch, listener)
   },
   onProjectChanged: (cb) => {
-    const listener = (_e: unknown, cwd: string) => cb(cwd)
+    const listener = (_e: unknown, payload: ProjectChangePayload) => cb(payload)
     ipcRenderer.on(IPC.evtProjectChanged, listener)
     return () => ipcRenderer.removeListener(IPC.evtProjectChanged, listener)
   },

@@ -1,48 +1,124 @@
-import { useEffect, useRef, useState } from 'react'
-import { Send, Square, Flame, Paperclip, X, Info, AlertTriangle, XCircle } from 'lucide-react'
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useShallow } from 'zustand/react/shallow'
+import {
+  Send,
+  Square,
+  Flame,
+  Paperclip,
+  X,
+  Info,
+  AlertTriangle,
+  XCircle,
+  ArrowDown,
+  CornerDownRight
+} from 'lucide-react'
 import {
   useStore,
-  selectCurrentRun,
+  selectCurrentRunId,
   isWorking,
   promptsForRun,
   type PendingPrompt,
   type Notice
 } from '../store/store'
 import { MarkdownView } from './MarkdownView'
+import { StreamMarkdown } from './StreamMarkdown'
 import { ForgeAnvil } from './ForgeAnvil'
 import { BallPeenHammer } from './BallPeenHammer'
-import type { ThreadMessage } from '@shared/types'
+import type { RunStatus, ThreadMessage } from '@shared/types'
+
+/** Which optional panes to render on a message. Passed down so each row doesn't subscribe. */
+export interface DisplayToggles {
+  thinking: boolean
+  tools: boolean
+  toolResults: boolean
+}
+
+/** How close to the bottom still counts as "following along". */
+const PIN_THRESHOLD = 60
 
 export function Forge(): JSX.Element {
   const session = useStore((s) => s.session)
   const loading = useStore((s) => s.loadingSession)
-  const run = useStore(selectCurrentRun)
   const selectedSessionPath = useStore((s) => s.selectedSessionPath)
   const selectedCwd = useStore((s) => s.selectedCwd)
   const messageSpacing = useStore((s) => s.messageSpacing)
-  const pendingPrompts = useStore((s) => s.pendingPrompts)
   const notices = useStore((s) => s.notices)
-  const bottomRef = useRef<HTMLDivElement>(null)
 
-  const prompts = promptsForRun(pendingPrompts, run?.runId)
-  const streamingText = run?.text ?? ''
-  const streamingThinking = run?.thinking ?? ''
-  const working = !!run && isWorking(run.status)
-  // The turn has finished streaming but the authoritative session hasn't swapped
-  // in yet — keep the text on screen as a settled assistant bubble (no hammer).
-  const settling = !!run && run.status === 'finalizing' && !!(streamingText || streamingThinking)
+  // Subscribe to the run by id + the few fields we render, never to the stream
+  // text — that belongs to <LiveRow>, the only thing that should repaint per frame.
+  const runId = useStore(selectCurrentRunId)
+  const run = useStore(
+    useShallow((s) => {
+      const r = runId ? s.runs[runId] : undefined
+      return r
+        ? {
+            status: r.status,
+            startedAt: r.startedAt,
+            currentTool: r.currentTool,
+            phase: r.phase,
+            retry: r.retry,
+            uiStatus: r.uiStatus,
+            unresponsive: r.unresponsive
+          }
+        : undefined
+    })
+  )
+  const hasStream = useStore((s) => (runId ? !!s.streams[runId] : false))
+  const show: DisplayToggles = useStore(
+    useShallow((s) => ({
+      thinking: s.showThinking,
+      tools: s.showTools,
+      toolResults: s.showToolResults
+    }))
+  )
+  const prompts = useStore(useShallow((s) => promptsForRun(s.pendingPrompts, runId ?? undefined)))
 
+  const bodyRef = useRef<HTMLDivElement>(null)
+  const pinnedRef = useRef(true)
+  const [pinned, setPinned] = useState(true)
+
+  const onScroll = useCallback(() => {
+    const el = bodyRef.current
+    if (!el) return
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < PIN_THRESHOLD
+    // Only re-render when the pinned-ness actually flips, not on every scroll tick.
+    if (atBottom !== pinnedRef.current) {
+      pinnedRef.current = atBottom
+      setPinned(atBottom)
+    }
+  }, [])
+
+  /**
+   * Keep the newest content in view while the user is following along, and leave
+   * the scroll position completely alone once they've scrolled up to read back.
+   * An instant `scrollTop` assignment inside rAF (rather than a smooth
+   * scrollIntoView) is what stops the view from fighting itself when new text
+   * arrives many times a second.
+   */
+  const stickToBottom = useCallback(() => {
+    if (!pinnedRef.current) return
+    requestAnimationFrame(() => {
+      const el = bodyRef.current
+      if (el && pinnedRef.current) el.scrollTop = el.scrollHeight
+    })
+  }, [])
+
+  useLayoutEffect(() => {
+    stickToBottom()
+  }, [session?.messages.length, prompts.length, notices.length, run?.status, stickToBottom])
+
+  // Switching conversations should start pinned to the newest message again.
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [
-    session?.messages.length,
-    streamingText,
-    streamingThinking,
-    working,
-    settling,
-    prompts.length,
-    notices.length
-  ])
+    pinnedRef.current = true
+    setPinned(true)
+  }, [selectedSessionPath, selectedCwd])
+
+  const jumpToBottom = (): void => {
+    pinnedRef.current = true
+    setPinned(true)
+    const el = bodyRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }
 
   // Nothing selected at all — the cold forge.
   if (!selectedSessionPath && !selectedCwd && !run) {
@@ -90,7 +166,7 @@ export function Forge(): JSX.Element {
         <BallPeenHammer size={14} className="copper" />
         <span className="label-tech">{selectedSessionPath ? 'Forge — Session' : 'Forge — New Session'}</span>
       </div>
-      <div className="pane-body">
+      <div className="pane-body" ref={bodyRef} onScroll={onScroll}>
         {loading && !session ? (
           <div className="empty">
             <span className="muted">Loading session…</span>
@@ -98,27 +174,36 @@ export function Forge(): JSX.Element {
         ) : (
           <div className={`thread spacing-${messageSpacing}`}>
             {session?.messages.map((m) => (
-              <Message key={m.id} m={m} />
+              <Message key={m.id} m={m} show={show} />
             ))}
-            {run && working && (
-              <WorkingRow
+            {runId && run && hasStream && (
+              <LiveRow
+                runId={runId}
                 status={run.status}
                 startedAt={run.startedAt}
                 currentTool={run.currentTool}
-                text={streamingText}
-                thinking={streamingThinking}
                 waiting={prompts.length > 0}
+                phase={run.phase}
+                uiStatus={run.uiStatus?.status}
+                showThinking={show.thinking}
+                onAdvance={stickToBottom}
               />
             )}
-            {settling && <SettledAssistant text={streamingText} thinking={streamingThinking} />}
+            {runId && run?.retry && <RetryCard retry={run.retry} />}
+            {runId && run?.unresponsive && <UnresponsiveCard runId={runId} />}
             {prompts.map((p) => (
               <InteractivePrompt key={p.id} prompt={p} />
             ))}
             {notices.map((n) => (
               <NoticeRow key={n.id} notice={n} />
             ))}
-            <div ref={bottomRef} />
           </div>
+        )}
+        {!pinned && (
+          <button className="jump-bottom" title="Jump to latest" onClick={jumpToBottom}>
+            <ArrowDown size={13} />
+            Latest
+          </button>
         )}
       </div>
       <Composer />
@@ -126,13 +211,72 @@ export function Forge(): JSX.Element {
   )
 }
 
+/**
+ * The live turn. This is the only component subscribed to the stream buffers, so
+ * it is the only thing React repaints as text arrives — the settled thread above
+ * it, the sidebar, and the composer all stay untouched.
+ */
+const LiveRow = memo(function LiveRow({
+  runId,
+  status,
+  startedAt,
+  currentTool,
+  waiting,
+  phase,
+  uiStatus,
+  showThinking,
+  onAdvance
+}: {
+  runId: string
+  status: RunStatus
+  startedAt: number
+  currentTool?: string
+  waiting: boolean
+  phase?: 'compacting' | 'retrying' | null
+  uiStatus?: string
+  showThinking: boolean
+  onAdvance: () => void
+}): JSX.Element | null {
+  const stream = useStore((s) => s.streams[runId])
+  const text = stream?.text ?? ''
+  const thinking = stream?.thinking ?? ''
+
+  // Runs after every commit of this subtree, i.e. once per flush.
+  useLayoutEffect(() => {
+    onAdvance()
+  })
+
+  if (isWorking(status)) {
+    return (
+      <WorkingRow
+        status={status}
+        startedAt={startedAt}
+        currentTool={currentTool}
+        text={text}
+        thinking={thinking}
+        waiting={waiting}
+        phase={phase}
+        uiStatus={uiStatus}
+      />
+    )
+  }
+  // The turn has finished streaming but the authoritative session hasn't swapped
+  // in yet — keep the text on screen as a settled assistant bubble (no hammer).
+  if (status === 'finalizing' && (text || thinking)) {
+    return <SettledAssistant text={text} thinking={thinking} showThinking={showThinking} />
+  }
+  return null
+})
+
 function WorkingRow({
   status,
   startedAt,
   currentTool,
   text,
   thinking,
-  waiting
+  waiting,
+  phase,
+  uiStatus
 }: {
   status: string
   startedAt: number
@@ -140,6 +284,8 @@ function WorkingRow({
   text: string
   thinking: string
   waiting?: boolean
+  phase?: 'compacting' | 'retrying' | null
+  uiStatus?: string
 }): JSX.Element {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
@@ -147,15 +293,21 @@ function WorkingRow({
     return () => clearInterval(t)
   }, [])
   const elapsed = Math.max(0, Math.floor((now - startedAt) / 1000))
+  // Compaction and retries produce no output, so without naming them the UI just
+  // looks stalled.
   const label = waiting
     ? 'Waiting for you'
-    : status === 'finalizing'
-      ? 'Finishing'
-      : currentTool
-        ? `Running ${currentTool}`
-        : thinking && !text
-          ? 'Thinking'
-          : 'Forging'
+    : phase === 'compacting'
+      ? 'Compacting context'
+      : phase === 'retrying'
+        ? 'Retrying'
+        : status === 'finalizing'
+          ? 'Finishing'
+          : currentTool
+            ? `Running ${currentTool}`
+            : thinking && !text
+              ? 'Thinking'
+              : 'Forging'
 
   return (
     <div className="msg assistant working">
@@ -167,13 +319,15 @@ function WorkingRow({
           <span className="working-label">{label}…</span>
           <span className="working-elapsed">{fmtElapsed(elapsed)}</span>
         </div>
+        {/* Status an extension pushed via ctx.ui.setStatus — previously dropped. */}
+        {uiStatus && <div className="working-substatus">{uiStatus}</div>}
         {thinking && !text && (
           <details className="thinking" open>
             <summary>✦ thinking</summary>
             <div className="content">{thinking}</div>
           </details>
         )}
-        {text && <MarkdownView source={text} />}
+        {text && <StreamMarkdown source={text} />}
         {text && <span className="muted">▍</span>}
       </div>
     </div>
@@ -192,8 +346,15 @@ function fmtElapsed(s: number): string {
  * assistant message so the handoff is visually seamless — and it guarantees the
  * text never blinks out between "done streaming" and "reloaded".
  */
-function SettledAssistant({ text, thinking }: { text: string; thinking: string }): JSX.Element {
-  const showThinking = useStore((s) => s.showThinking)
+function SettledAssistant({
+  text,
+  thinking,
+  showThinking
+}: {
+  text: string
+  thinking: string
+  showThinking: boolean
+}): JSX.Element {
   return (
     <div className="msg assistant">
       <div className="avatar">
@@ -206,7 +367,9 @@ function SettledAssistant({ text, thinking }: { text: string; thinking: string }
             <div className="content">{thinking}</div>
           </details>
         )}
-        {text && <MarkdownView source={text} />}
+        {/* Same block-memoized renderer as while streaming, so the handoff to the
+            settled bubble doesn't re-parse the whole reply from scratch. */}
+        {text && <StreamMarkdown source={text} />}
       </div>
     </div>
   )
@@ -331,6 +494,74 @@ function InteractivePrompt({ prompt }: { prompt: PendingPrompt }): JSX.Element {
   )
 }
 
+/**
+ * A provider call failed and the harness is waiting out a backoff before trying
+ * again. Without this the UI just sits there looking hung.
+ */
+function RetryCard({
+  retry
+}: {
+  retry: NonNullable<import('../store/store').RunMeta['retry']>
+}): JSX.Element {
+  const abortRetry = useStore((s) => s.abortRetry)
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 250)
+    return () => clearInterval(t)
+  }, [])
+  const remaining = Math.max(0, retry.startedAt + retry.delayMs - now)
+
+  return (
+    <div className="msg assistant">
+      <div className="avatar">
+        <BallPeenHammer size={16} />
+      </div>
+      <div className="body">
+        <div className="retry-card">
+          <div className="retry-head">
+            <AlertTriangle size={13} />
+            <span>
+              Attempt {retry.attempt} of {retry.maxAttempts}
+              {remaining > 0 ? ` — retrying in ${Math.ceil(remaining / 1000)}s` : ' — retrying now'}
+            </span>
+            <button className="btn ghost" onClick={() => void abortRetry()}>
+              Cancel retry
+            </button>
+          </div>
+          {retry.errorMessage && <div className="retry-reason">{retry.errorMessage}</div>}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/** The harness stopped answering liveness pings mid-turn. */
+function UnresponsiveCard({ runId }: { runId: string }): JSX.Element {
+  const restartRun = useStore((s) => s.restartRun)
+  return (
+    <div className="msg assistant">
+      <div className="avatar">
+        <BallPeenHammer size={16} />
+      </div>
+      <div className="body">
+        <div className="retry-card">
+          <div className="retry-head">
+            <AlertTriangle size={13} />
+            <span>The harness stopped responding.</span>
+            <button className="btn ghost" onClick={() => void restartRun(runId)}>
+              Restart
+            </button>
+          </div>
+          <div className="retry-reason">
+            It may still be working on something slow. Restarting ends this run and
+            starts a fresh process.
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 /** A transient, auto-dismissing notice from the harness (`notify`). */
 function NoticeRow({ notice }: { notice: Notice }): JSX.Element {
   const dismiss = useStore((s) => s.dismissNotice)
@@ -350,10 +581,19 @@ function NoticeRow({ notice }: { notice: Notice }): JSX.Element {
   )
 }
 
-function Message({ m }: { m: ThreadMessage }): JSX.Element | null {
-  const showThinking = useStore((s) => s.showThinking)
-  const showTools = useStore((s) => s.showTools)
-  const showToolResults = useStore((s) => s.showToolResults)
+/**
+ * A settled message from the session file. Memoized on `m` identity and the
+ * shared toggles object: a streaming turn never changes either, so a long thread
+ * costs nothing to keep on screen while new text arrives.
+ */
+const Message = memo(function Message({
+  m,
+  show
+}: {
+  m: ThreadMessage
+  show: DisplayToggles
+}): JSX.Element | null {
+  const { thinking: showThinking, tools: showTools, toolResults: showToolResults } = show
 
   if (m.role === 'user') {
     return (
@@ -424,13 +664,18 @@ function Message({ m }: { m: ThreadMessage }): JSX.Element | null {
       </div>
     </div>
   )
-}
+})
 
 /** Compact per-response stats line: output tokens, throughput, model. */
 function MsgStats({ m }: { m: ThreadMessage }): JSX.Element | null {
   const parts: string[] = []
   if (m.outputTokens) parts.push(`${fmtTok(m.outputTokens)} out`)
-  if (m.tps) parts.push(`${m.tps >= 100 ? Math.round(m.tps) : m.tps.toFixed(1)} tok/s`)
+  if (m.tps) {
+    // A leading `~` marks a rate derived from record timestamps or measured by us,
+    // as opposed to one the inference backend reported.
+    const rate = m.tps >= 100 ? Math.round(m.tps) : m.tps.toFixed(1)
+    parts.push(`${m.tpsApprox === false ? '' : '~'}${rate} tok/s`)
+  }
   if (m.usage?.cacheRead) parts.push(`${fmtTok(m.usage.cacheRead)} cached`)
   if (m.model) parts.push(m.model)
   if (parts.length === 0) return null
@@ -447,13 +692,29 @@ function Composer(): JSX.Element {
   const [text, setText] = useState('')
   const sendPrompt = useStore((s) => s.sendPrompt)
   const abort = useStore((s) => s.abort)
-  const run = useStore(selectCurrentRun)
+  // A boolean, not the run object: typing in here must not re-render per frame of
+  // streamed output, and this only flips at the edges of a turn.
+  const running = useStore((s) => {
+    const id = selectCurrentRunId(s)
+    return !!id && isWorking(s.runs[id]?.status ?? 'idle')
+  })
   const harnesses = useStore((s) => s.harnesses)
   const view = useStore((s) => s.view)
   const selectedCwd = useStore((s) => s.selectedCwd)
   const selectedFile = useStore((s) => s.selectedFile)
   const attachViewedFile = useStore((s) => s.attachViewedFile)
   const setAttachViewedFile = useStore((s) => s.setAttachViewedFile)
+  const draftRestore = useStore((s) => s.draftRestore)
+  const takeDraftRestore = useStore((s) => s.takeDraftRestore)
+  // Messages the harness is holding. Display-only: the protocol has no command to
+  // withdraw one once it's queued.
+  const queued = useStore(
+    useShallow((s) => {
+      const id = selectCurrentRunId(s)
+      const q = id ? s.runs[id]?.queued : undefined
+      return [...(q?.steering ?? []), ...(q?.followUp ?? [])]
+    })
+  )
   const taRef = useRef<HTMLTextAreaElement>(null)
 
   const harnessId = view === 'dashboard' ? null : view.harnessId
@@ -470,14 +731,26 @@ function Composer(): JSX.Element {
     el.style.height = `${Math.min(el.scrollHeight, COMPOSER_MAX_H)}px`
   }, [text])
 
-  const submit = () => {
+  // The harness refused a prompt (e.g. the turn ended between keypress and write).
+  // Put the text back rather than losing it.
+  useEffect(() => {
+    if (!draftRestore) return
+    const restored = takeDraftRestore()
+    if (restored) setText((cur) => cur || restored)
+  }, [draftRestore, takeDraftRestore])
+
+  const submit = (behavior?: 'steer' | 'followUp') => {
     const t = text.trim()
     if (!t || !canSend) return
-    void sendPrompt(t)
     setText('')
+    void sendPrompt(t, behavior)
   }
 
-  const running = !!run && isWorking(run.status)
+  const placeholder = !canSend
+    ? 'Viewing only — no RPC launcher for this harness'
+    : running
+      ? 'Queue a follow-up…  (⌘↩ to steer this turn)'
+      : 'Fire up the forge…'
 
   return (
     <div className="composer">
@@ -504,30 +777,47 @@ function Composer(): JSX.Element {
           )}
         </div>
       )}
+      {queued.length > 0 && (
+        <div className="queue-bar" title="Held by the agent; it will run these in order">
+          {queued.map((q, i) => (
+            <span className="queue-chip" key={i}>
+              <CornerDownRight size={11} />
+              {q.length > 60 ? `${q.slice(0, 60)}…` : q}
+            </span>
+          ))}
+        </div>
+      )}
       <div className="box">
         <textarea
           ref={taRef}
           rows={1}
-          placeholder={canSend ? 'Fire up the forge…' : 'Viewing only — no RPC launcher for this harness'}
+          placeholder={placeholder}
           value={text}
+          // Enabled during a turn: the message queues instead of being lost.
           disabled={!canSend}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
               e.preventDefault()
-              submit()
+              // While streaming, ⌘/Ctrl+Enter steers the current turn; plain Enter
+              // queues a follow-up for the next one.
+              submit(running ? (e.metaKey || e.ctrlKey ? 'steer' : 'followUp') : undefined)
             }
           }}
         />
-        {running ? (
-          <button className="send-btn" title="Stop" onClick={() => void abort()}>
+        {running && (
+          <button className="send-btn ghost-btn" title="Stop this turn" onClick={() => void abort()}>
             <Square size={15} />
           </button>
-        ) : (
-          <button className="send-btn" title="Send" disabled={!canSend || !text.trim()} onClick={submit}>
-            <Send size={16} />
-          </button>
         )}
+        <button
+          className="send-btn"
+          title={running ? 'Queue as a follow-up (⌘↩ to steer)' : 'Send'}
+          disabled={!canSend || !text.trim()}
+          onClick={() => submit(running ? 'followUp' : undefined)}
+        >
+          <Send size={16} />
+        </button>
       </div>
       {!canSend && selectedCwd && (
         <div className="note">

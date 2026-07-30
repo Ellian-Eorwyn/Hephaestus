@@ -25,12 +25,13 @@ export const IPC = {
   agentSend: 'agent:send',
   agentRespond: 'agent:respond',
   agentAbort: 'agent:abort',
+  agentAbortRetry: 'agent:abortRetry',
   agentClose: 'agent:close',
   agentListRuns: 'agent:listRuns',
 
   // main -> renderer events
   evtSessionUpdated: 'evt:sessionUpdated',
-  evtAgentEvent: 'evt:agentEvent',
+  evtAgentBatch: 'evt:agentBatch',
   evtProjectChanged: 'evt:projectChanged',
   evtInstallProgress: 'evt:installProgress'
 } as const

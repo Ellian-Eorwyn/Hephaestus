@@ -11,19 +11,30 @@ import { HarnessInstaller } from './harness-installer'
 import { getPreset } from '@shared/harness-presets'
 import { expandHome, normalizeDir } from './harness-registry'
 import { encodeCwd } from './session-parse'
-import type { AgentEvent, ExtensionUIResponse, InstallEvent } from '@shared/types'
+import type { AgentBatch, ExtensionUIResponse, InstallEvent } from '@shared/types'
 
 const registry = new HarnessRegistry()
 const sessions = new SessionStore()
 const files = new FileService()
 let mainWindow: BrowserWindow | null = null
 
-const agent = new AgentDriver((event: AgentEvent) => {
-  mainWindow?.webContents.send(IPC.evtAgentEvent, event)
+/**
+ * Push an event to the renderer. Guarded because teardown ordering (and a
+ * reload) can leave us holding a window whose webContents is already gone,
+ * while agent processes are still streaming.
+ */
+function send(channel: string, payload: unknown): void {
+  const wc = mainWindow?.webContents
+  if (!wc || wc.isDestroyed()) return
+  wc.send(channel, payload)
+}
+
+const agent = new AgentDriver((batch: AgentBatch) => {
+  send(IPC.evtAgentBatch, batch)
 })
 
 const installer = new HarnessInstaller((event: InstallEvent) => {
-  mainWindow?.webContents.send(IPC.evtInstallProgress, event)
+  send(IPC.evtInstallProgress, event)
 })
 
 function createWindow(): void {
@@ -55,8 +66,8 @@ function createWindow(): void {
 
 function watchHarnesses(): void {
   for (const h of registry.list()) {
-    sessions.watch(h.id, h.agentDir, (filePath) => {
-      mainWindow?.webContents.send(IPC.evtSessionUpdated, { harnessId: h.id, path: filePath })
+    sessions.watch(h.id, h.agentDir, (payload) => {
+      send(IPC.evtSessionUpdated, payload)
     })
   }
 }
@@ -116,8 +127,8 @@ function registerIpc(): void {
   ipcMain.handle(IPC.listFiles, async (_e, cwd: string) => files.listFiles(cwd))
   ipcMain.handle(IPC.readFile, async (_e, filePath: string) => files.readFile(filePath))
   ipcMain.handle(IPC.watchProject, async (_e, cwd: string) => {
-    files.watch(cwd, () => {
-      mainWindow?.webContents.send(IPC.evtProjectChanged, cwd)
+    files.watch(cwd, (payload) => {
+      send(IPC.evtProjectChanged, payload)
     })
   })
 
@@ -166,8 +177,10 @@ function registerIpc(): void {
     if (!h) return { ok: false, reason: 'Unknown harness' }
     return agent.open(h, input.cwd, input.sessionPath)
   })
-  ipcMain.handle(IPC.agentSend, async (_e, input: { runId: string; text: string }) =>
-    agent.send(input.runId, input.text)
+  ipcMain.handle(
+    IPC.agentSend,
+    async (_e, input: { runId: string; text: string; behavior?: 'steer' | 'followUp' }) =>
+      agent.send(input.runId, input.text, input.behavior)
   )
   ipcMain.handle(
     IPC.agentRespond,
@@ -175,6 +188,7 @@ function registerIpc(): void {
       agent.respond(input.runId, input.response)
   )
   ipcMain.handle(IPC.agentAbort, async (_e, runId: string) => agent.abort(runId))
+  ipcMain.handle(IPC.agentAbortRetry, async (_e, runId: string) => agent.abortRetry(runId))
   ipcMain.handle(IPC.agentClose, async (_e, runId: string) => agent.close(runId))
   ipcMain.handle(IPC.agentListRuns, async () => agent.snapshot())
 }

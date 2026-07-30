@@ -146,6 +146,8 @@ export interface ThreadMessage {
   outputTokens?: number
   /** Effective output tokens/sec for this turn (output ÷ response time), when derivable. */
   tps?: number
+  /** True when `tps` is an estimate rather than a provider-reported figure. */
+  tpsApprox?: boolean
 }
 
 export interface SessionSummary {
@@ -162,6 +164,23 @@ export interface SessionSummary {
   cwd?: string
 }
 
+/**
+ * A session file changed on disk. Carries the freshly-computed summary so the
+ * renderer can patch the one row that changed instead of re-listing (and
+ * re-parsing) every session of every project in the harness.
+ */
+export interface SessionUpdatePayload {
+  harnessId: string
+  /** Absolute path to the .jsonl that changed. */
+  path: string
+  /** Encoded project folder name (the basename of the file's directory). */
+  projectEncoded: string
+  /** Fresh summary, or null if the file became unreadable. */
+  summary: SessionSummary | null
+  /** True when this file wasn't previously known — the sidebar may need a new row. */
+  isNew: boolean
+}
+
 export interface ProjectSummary {
   /** Decoded working directory. */
   cwd: string
@@ -175,6 +194,8 @@ export interface ProjectSummary {
 export interface SessionDetail {
   path: string
   header: SessionRecord
+  /** Session name, when the harness has set one (`session_info_changed`). */
+  name?: string
   messages: ThreadMessage[]
   usage: UsageTotals
   /** Last assistant message's model context window, for the context gauge. */
@@ -203,6 +224,30 @@ export interface FileNode {
   children?: FileNode[]
 }
 
+export type FileChangeType = 'add' | 'change' | 'unlink' | 'addDir' | 'unlinkDir'
+
+export interface FileChange {
+  type: FileChangeType
+  /** Absolute path. */
+  path: string
+  /** Present for add/change, so a viewer can skip re-reading unchanged content. */
+  size?: number
+  mtimeMs?: number
+}
+
+/**
+ * A burst of filesystem activity in a watched project, coalesced. Carrying the
+ * individual paths (rather than just the project root) is what lets the renderer
+ * reload the open file and skip re-listing the tree when nothing structural moved.
+ */
+export interface ProjectChangePayload {
+  cwd: string
+  /** Deduped by path, latest event per path wins. Capped — see `overflow`. */
+  changes: FileChange[]
+  /** Too many distinct paths to enumerate (e.g. an install or a branch switch). */
+  overflow: boolean
+}
+
 export interface SheetData {
   name: string
   rows: string[][]
@@ -220,6 +265,9 @@ export interface FileContent {
   /** parsed sheets (spreadsheet kind) */
   sheets?: SheetData[]
   truncated: boolean
+  /** Stat at read time, so a watcher event can tell whether a re-read is needed. */
+  size?: number
+  mtimeMs?: number
 }
 
 // ---------------------------------------------------------------------------
@@ -265,29 +313,135 @@ export type ExtensionUIResponse =
   | { confirmed: boolean }
   | { cancelled: true }
 
-export interface AgentEvent {
-  /** Stable id of the run this event belongs to (assigned by the driver on open). */
+/**
+ * Loosely-typed tool arguments. The harness passes tool input through verbatim,
+ * so we name only the fields we act on (`path` for edit/write, `command` for
+ * bash) and keep the rest opaque.
+ */
+export interface ToolArgsLike {
+  path?: string
+  command?: string
+  [k: string]: unknown
+}
+
+/**
+ * Throughput/usage numbers for the live stats readout.
+ *
+ * Two sources feed this, and both are supported at once. When the harness reports
+ * `StreamTelemetry` (a pi-forge addition, emitted by OpenAI-compatible and Mistral
+ * providers) the numbers are the provider's own and `approx` is false. Otherwise
+ * the driver measures throughput off the wall clock and sets `approx`, so plain
+ * `pi` and Anthropic/Google-backed harnesses still get a readout — just a labelled
+ * estimate. Detection is per run, so nothing needs configuring either way.
+ */
+export interface StatsPatch {
+  tokPerSec?: number
+  ttftMs?: number
+  /** Speculative-decode acceptance rate (MTP), when the provider reports it. */
+  acceptanceRate?: number
+  /** True when these throughput figures were measured by us, not reported. */
+  approx?: boolean
+  usage?: Usage
+  cost?: number
+  contextTokens?: number
+  contextWindow?: number
+  contextPercent?: number
+  /** Set on the authoritative `get_session_stats` result fetched at end of turn. */
+  final?: boolean
+}
+
+/**
+ * A single normalized event from the harness RPC stream, or one the driver
+ * synthesizes for the renderer. Names match pi's own event types where they map
+ * 1:1 so the stream stays recognizable against `docs/rpc.md`.
+ */
+export type AgentStreamEvent =
+  // Turn/message lifecycle
+  | { type: 'agent_start' }
+  | { type: 'agent_end'; willRetry?: boolean }
+  /**
+   * The agent is fully idle with nothing queued — pi's own `waitForIdle` waits on
+   * this. Distinct from `agent_end`, which fires per turn and is followed by
+   * another turn when steering/follow-ups are pending.
+   */
+  | { type: 'agent_settled' }
+  | { type: 'turn_start' }
+  | { type: 'turn_end' }
+  | { type: 'message_start'; role?: string }
+  | { type: 'message_end'; usage?: Usage; stopReason?: string; model?: string }
+  // Tool execution. `edit`/`write` args carry the absolute file path; `edit`
+  // results carry a unified diff we can show for free.
+  | { type: 'tool_execution_start'; toolCallId: string; toolName: string; args?: ToolArgsLike }
+  | { type: 'tool_execution_update'; toolCallId: string; toolName: string; partialResult?: string }
+  | {
+      type: 'tool_execution_end'
+      toolCallId: string
+      toolName: string
+      isError?: boolean
+      diff?: string
+    }
+  // Queueing, compaction, retry — states that otherwise look like a hang.
+  | { type: 'queue_update'; steering: string[]; followUp: string[] }
+  | { type: 'compaction_start'; reason: string }
+  | { type: 'compaction_end'; aborted?: boolean; errorMessage?: string }
+  | {
+      type: 'auto_retry_start'
+      attempt: number
+      maxAttempts: number
+      delayMs: number
+      errorMessage: string
+    }
+  | { type: 'auto_retry_end'; success: boolean; finalError?: string }
+  | { type: 'session_info_changed'; name?: string }
+  // Interactive prompts (blocking) and display-only status from extensions.
+  | { type: 'extension_ui_request'; ui: ExtensionUIRequest }
+  | { type: 'ui_cancelled'; id: string }
+  | { type: 'ui_status'; status?: string; widget?: string[]; title?: string }
+  // Driver-synthesized.
+  | { type: 'session_bound'; sessionPath: string }
+  | { type: 'stream_error'; reason: string }
+  | { type: 'prompt_rejected'; reason: string }
+  | {
+      type: 'error'
+      errorReason: string
+      stderrTail?: string
+      exitCode?: number | null
+      signal?: string | null
+    }
+  | { type: 'agent_exit'; exitCode: number | null; signal?: string | null }
+  | { type: 'unresponsive' }
+  | { type: 'responsive' }
+  | { type: 'stats'; patch: StatsPatch }
+
+/**
+ * One entry in a batch. Consecutive deltas of the same kind are pre-joined, so
+ * replaying `items` in order reproduces the harness's stdout order exactly
+ * (minus per-delta granularity, which nothing depends on).
+ */
+export type BatchItem =
+  | { kind: 'text'; text: string }
+  | { kind: 'thinking'; text: string }
+  | { kind: 'event'; event: AgentStreamEvent }
+
+/**
+ * A coalesced flush of stream activity for one run. The driver batches on a
+ * short timer (and flushes immediately for lifecycle events) so the renderer
+ * commits once per frame instead of once per token.
+ */
+export interface AgentBatch {
+  /** Stable id of the run this batch belongs to (assigned by the driver on open). */
   runId: string
   harnessId: string
   /** Working directory the run was opened in. */
-  cwd?: string
+  cwd: string
   /** Session .jsonl path once known (undefined for a brand-new chat until adopted). */
   sessionPath?: string
-  /** Raw event type from the harness RPC stream. */
-  type: string
-  /** Streaming visible-text delta, when present. */
-  delta?: string
-  /** Streaming reasoning/thinking delta, when present. */
-  thinkingDelta?: string
-  toolName?: string
-  /** Interactive-prompt request payload (carried on `extension_ui_request`). */
-  ui?: ExtensionUIRequest
-  // Abnormal-termination detail (carried on `error`/`agent_exit` events).
-  exitCode?: number | null
-  signal?: string | null
-  errorReason?: string
-  stderrTail?: string
-  raw?: unknown
+  /**
+   * Monotonic per-run flush counter (1-based). The renderer drops batches it has
+   * already applied (`seq <= last`) and resyncs from a snapshot on a gap.
+   */
+  seq: number
+  items: BatchItem[]
 }
 
 /** Lifecycle of a single driven run. */
@@ -315,6 +469,23 @@ export interface RunSnapshot {
   error?: string
   /** An in-flight blocking prompt awaiting a response, so a reconnecting renderer restores it. */
   pendingUi?: ExtensionUIRequest | null
+  /** The harness stopped answering liveness pings while a turn was in flight. */
+  unresponsive?: boolean
+  /** Latest display-only status an extension pushed via `ctx.ui.setStatus`/`setTitle`/`setWidget`. */
+  uiStatus?: { status?: string; title?: string; widget?: string[] }
+  /** Messages the harness is holding to deliver during / after the current turn. */
+  queued?: { steering: string[]; followUp: string[] }
+  /** A non-streaming activity the turn is currently occupied by. */
+  phase?: 'compacting' | 'retrying' | null
+  /** In-flight automatic retry after a provider failure. */
+  retry?: {
+    attempt: number
+    maxAttempts: number
+    delayMs: number
+    /** Epoch ms the backoff started, so a countdown survives a reconnect. */
+    startedAt: number
+    errorMessage: string
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -379,18 +550,29 @@ export interface HephApi {
     cwd: string
     sessionPath?: string
   }): Promise<{ ok: boolean; reason?: string; runId?: string }>
-  agentSend(input: { runId: string; text: string }): Promise<{ ok: boolean; reason?: string }>
+  /**
+   * Send a prompt. While a turn is already streaming the harness requires a
+   * `behavior`: `steer` lands in the current turn, `followUp` queues for the
+   * next one (the default).
+   */
+  agentSend(input: {
+    runId: string
+    text: string
+    behavior?: 'steer' | 'followUp'
+  }): Promise<{ ok: boolean; reason?: string }>
   /** Answer an in-flight interactive prompt (RPC `extension_ui_response`). */
   agentRespond(input: { runId: string; response: ExtensionUIResponse }): Promise<void>
   agentAbort(runId: string): Promise<void>
+  /** Cancel a pending auto-retry instead of waiting out its backoff. */
+  agentAbortRetry(runId: string): Promise<void>
   agentClose(runId: string): Promise<void>
   /** Snapshot every live run so the renderer can resync after a reload/disconnect. */
   agentListRuns(): Promise<RunSnapshot[]>
 
   // Subscriptions (return an unsubscribe fn)
-  onSessionUpdated(cb: (payload: { harnessId: string; path: string }) => void): () => void
-  onAgentEvent(cb: (event: AgentEvent) => void): () => void
-  onProjectChanged(cb: (cwd: string) => void): () => void
+  onSessionUpdated(cb: (payload: SessionUpdatePayload) => void): () => void
+  onAgentBatch(cb: (batch: AgentBatch) => void): () => void
+  onProjectChanged(cb: (payload: ProjectChangePayload) => void): () => void
   onInstallProgress(cb: (event: InstallEvent) => void): () => void
 }
 
