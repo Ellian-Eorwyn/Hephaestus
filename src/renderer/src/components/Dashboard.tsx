@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
-import { Activity, FolderGit2, MessagesSquare } from 'lucide-react'
+import { Activity, FolderGit2, Hammer, MessagesSquare } from 'lucide-react'
 import { useStore } from '../store/store'
-import { BallPeenHammer } from './BallPeenHammer'
+import { ICON } from '../lib/icons'
 import type { ProjectSummary } from '@shared/types'
 
 interface HarnessStats {
@@ -58,18 +58,18 @@ export function Dashboard(): JSX.Element {
           return (
             <div className="card" key={s.id}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <BallPeenHammer size={16} className="copper" />
+                <Hammer size={ICON.md} className="copper" />
                 <h3>{s.label}</h3>
                 <span
                   className="label-tech"
                   style={{ marginLeft: 'auto', color: statusColor }}
                 >
-                  <Activity size={11} /> {statusLabel}
+                  <Activity size={ICON.xs} /> {statusLabel}
                 </span>
               </div>
               <div style={{ display: 'flex', gap: 20, margin: '16px 0' }}>
-                <Metric icon={<FolderGit2 size={13} />} label="projects" value={s.projects} />
-                <Metric icon={<MessagesSquare size={13} />} label="sessions" value={s.sessions} />
+                <Metric icon={<FolderGit2 size={ICON.sm} />} label="projects" value={s.projects} />
+                <Metric icon={<MessagesSquare size={ICON.sm} />} label="sessions" value={s.sessions} />
                 <Metric label="tokens" value={fmt(s.tokens)} />
               </div>
               <div className="label-tech" style={{ marginBottom: 6 }}>

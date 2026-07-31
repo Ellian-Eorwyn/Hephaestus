@@ -19,6 +19,27 @@ const files = new FileService()
 let mainWindow: BrowserWindow | null = null
 
 /**
+ * Append a line to the app log.
+ *
+ * A hang or a renderer crash leaves nothing behind otherwise — the window is dead
+ * and the console with it — so the only account of what happened is whatever we
+ * wrote to disk first. Fire-and-forget: logging must never be able to make things
+ * worse.
+ */
+function log(line: string): void {
+  const stamped = `${new Date().toISOString()} ${line}\n`
+  console.log(stamped.trimEnd())
+  try {
+    const dir = app.getPath('logs')
+    void fs.mkdir(dir, { recursive: true }).then(() =>
+      fs.appendFile(path.join(dir, 'hephaestus.log'), stamped, 'utf8').catch(() => {})
+    )
+  } catch {
+    // no log path available (very early startup) — the console line still went out
+  }
+}
+
+/**
  * Push an event to the renderer. Guarded because teardown ordering (and a
  * reload) can leave us holding a window whose webContents is already gone,
  * while agent processes are still streaming.
@@ -61,6 +82,22 @@ function createWindow(): void {
 
   mainWindow.on('closed', () => {
     mainWindow = null
+  })
+
+  // A wedged window is the one failure mode with no other trace. Record when it
+  // starts and stops so a "the app froze" report has a timestamp to sit against.
+  let unresponsiveSince = 0
+  mainWindow.on('unresponsive', () => {
+    unresponsiveSince = Date.now()
+    log('WARN window unresponsive')
+  })
+  mainWindow.on('responsive', () => {
+    const forMs = unresponsiveSince ? Date.now() - unresponsiveSince : 0
+    unresponsiveSince = 0
+    log(`INFO window responsive again after ${Math.round(forMs / 1000)}s`)
+  })
+  mainWindow.webContents.on('render-process-gone', (_e, details) => {
+    log(`ERROR renderer gone: reason=${details.reason} exitCode=${details.exitCode}`)
   })
 }
 
@@ -125,12 +162,14 @@ function registerIpc(): void {
   })
 
   ipcMain.handle(IPC.listFiles, async (_e, cwd: string) => files.listFiles(cwd))
+  ipcMain.handle(IPC.listDir, async (_e, dir: string) => files.listDir(dir))
+  ipcMain.handle(IPC.indexPaths, async (_e, cwd: string) => files.indexPaths(cwd))
   ipcMain.handle(IPC.readFile, async (_e, filePath: string) => files.readFile(filePath))
-  ipcMain.handle(IPC.watchProject, async (_e, cwd: string) => {
+  ipcMain.handle(IPC.watchProject, async (_e, cwd: string) =>
     files.watch(cwd, (payload) => {
       send(IPC.evtProjectChanged, payload)
     })
-  })
+  )
 
   ipcMain.handle(IPC.browseFolder, async () => {
     const result = await dialog.showOpenDialog({
@@ -194,6 +233,16 @@ function registerIpc(): void {
 }
 
 app.whenReady().then(async () => {
+  process.on('uncaughtException', (err) => {
+    log(`ERROR uncaught in main: ${err?.stack ?? String(err)}`)
+  })
+  process.on('unhandledRejection', (reason) => {
+    log(`ERROR unhandled rejection in main: ${String(reason)}`)
+  })
+  app.on('child-process-gone', (_e, details) => {
+    log(`ERROR child process gone: type=${details.type} reason=${details.reason}`)
+  })
+
   await registry.load()
   registerIpc()
   createWindow()

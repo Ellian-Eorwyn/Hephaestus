@@ -119,6 +119,23 @@ button:focus-visible {
   outline-offset: 1px;
 }
 
+/* ---------------------------------------------------------------------------
+   Icons
+
+   Chromium gives an inline <svg> an automatic minimum size of 0 inside a flex
+   line, unlike <img>. Every icon in this app sits in a flex row next to text of
+   unpredictable length, so without this a long file name or chat title squeezed
+   the glyph beside it narrower — and past a certain length, away entirely. That
+   is the whole "icons are different sizes or missing" symptom.
+
+   The text is what should give way instead; the rows that hold it are given
+   `min-width: 0` so they can.
+   --------------------------------------------------------------------------- */
+svg,
+img.icon {
+  flex: 0 0 auto;
+}
+
 ::-webkit-scrollbar {
   width: 9px;
   height: 9px;
@@ -261,9 +278,26 @@ button:focus-visible {
   border-radius: var(--radius);
   color: var(--text-2);
 }
+/* Denser variants, so pane headers don't need per-call-site inline sizes. */
+.icon-btn.sm {
+  width: 26px;
+  height: 26px;
+}
+.icon-btn.xs {
+  width: 24px;
+  height: 24px;
+}
 .icon-btn:hover {
   color: var(--copper-bright);
   background: var(--bg-2);
+}
+.icon-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.icon-btn:disabled:hover {
+  color: var(--text-2);
+  background: transparent;
 }
 
 /* ============================ Panels ============================ */
@@ -483,6 +517,8 @@ button:focus-visible {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  /* The name absorbs a narrow pane, not the glyph next to it. */
+  min-width: 0;
 }
 .project-row .pmeta {
   margin-left: auto;
@@ -502,6 +538,7 @@ button:focus-visible {
   overflow: hidden;
   text-overflow: ellipsis;
   color: var(--text-1);
+  min-width: 0;
 }
 .session-row .stoks {
   margin-left: auto;
@@ -916,6 +953,17 @@ button:focus-visible {
   color: var(--text-faint);
   width: 12px;
   flex-shrink: 0;
+  display: inline-flex;
+}
+/* Long file names ellipsize rather than pushing the glyph out of the row. */
+.filenode .fname {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.filenode .dir-loading {
+  margin-left: auto;
+  font-size: 11px;
 }
 
 .preview-header {
@@ -1264,8 +1312,9 @@ button:focus-visible {
   color: var(--text-2);
   padding: 40px;
 }
+/* Colour only — the size is a lucide `size` prop (ICON.hero), because a lucide icon
+   renders width/height attributes that `font-size` cannot touch. */
 .empty .glyph {
-  font-size: 46px;
   color: var(--copper-dim);
   margin-bottom: 14px;
 }
@@ -1279,6 +1328,35 @@ button:focus-visible {
 }
 .copper {
   color: var(--copper-bright);
+}
+
+/* The renderer threw and the tree was torn down (see ErrorBoundary). */
+.crash-screen {
+  height: 100%;
+  display: grid;
+  place-items: center;
+  padding: 40px;
+  background: var(--bg-0);
+  color: var(--text-1);
+}
+.crash-detail {
+  max-width: 720px;
+  max-height: 320px;
+  overflow: auto;
+  margin: 16px 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--code-bg);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  color: var(--text-2);
+}
+.crash-actions {
+  display: flex;
+  gap: 8px;
 }
 
 /* Dashboard */
@@ -1696,6 +1774,62 @@ button:focus-visible {
   font-size: 10.5px;
   letter-spacing: 0.02em;
   color: var(--text-faint);
+}
+
+/* ---------------------------------------------------------------------------
+   File links — a path the agent named, clickable to open it in the preview
+   --------------------------------------------------------------------------- */
+.file-link {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 0 3px;
+  margin: 0 -1px;
+  border: none;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+  color: var(--copper-bright);
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 2px;
+  vertical-align: baseline;
+  cursor: pointer;
+}
+.file-link:hover {
+  background: color-mix(in srgb, var(--copper) 18%, transparent);
+  text-decoration-style: solid;
+}
+.file-link svg {
+  align-self: center;
+  color: inherit;
+  opacity: 0.75;
+}
+.file-link.code {
+  background: var(--bg-2);
+  padding: 1px 5px;
+}
+.file-link.code:hover {
+  background: color-mix(in srgb, var(--copper) 22%, transparent);
+}
+/* A standalone row above a tool call's arguments. */
+.file-link.chip {
+  font-size: 11.5px;
+  text-decoration: none;
+  padding: 3px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+.file-link.chip:hover {
+  border-color: var(--copper);
+}
+.toolpath {
+  margin-bottom: 8px;
+}
+
+/* Line targeted by a `file.ts:42` reference. */
+.codeview tr.target td {
+  background: color-mix(in srgb, var(--copper) 18%, transparent);
 }
 
 /* Sidebar run indicators */

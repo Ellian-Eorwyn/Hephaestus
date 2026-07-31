@@ -5,6 +5,7 @@ import {
   MessageSquare,
   Folder,
   FolderPlus,
+  Hammer,
   Plus,
   CheckSquare,
   Square,
@@ -14,8 +15,8 @@ import {
   X
 } from 'lucide-react'
 import { useStore, projectKey, samePath, isActive } from '../store/store'
+import { ICON } from '../lib/icons'
 import { ForgeAnvil } from './ForgeAnvil'
-import { BallPeenHammer } from './BallPeenHammer'
 import type { ProjectSummary, SessionSummary } from '@shared/types'
 
 function formatTokens(n: number): string {
@@ -85,21 +86,19 @@ export function Projects(): JSX.Element {
         <span className="label-tech">Projects</span>
         <div style={{ marginLeft: 'auto', display: 'flex', gap: 2 }}>
           <button
-            className="icon-btn"
-            style={{ width: 26, height: 26 }}
+            className="icon-btn sm"
             title="Add project folder"
             onClick={() => void browseAndAddProject()}
           >
-            <FolderPlus size={15} />
+            <FolderPlus size={ICON.md} />
           </button>
           {activeProjects.length > 0 && (
             <button
-              className="icon-btn"
-              style={{ width: 26, height: 26 }}
+              className="icon-btn sm"
               title={selectionMode ? 'Cancel selection' : 'Select projects to archive'}
               onClick={toggleSelectionMode}
             >
-              {selectionMode ? <X size={15} /> : <CheckSquare size={15} />}
+              {selectionMode ? <X size={ICON.md} /> : <CheckSquare size={ICON.md} />}
             </button>
           )}
         </div>
@@ -108,7 +107,7 @@ export function Projects(): JSX.Element {
       <div className="pane-body">
         {dragOver && (
           <div className="drop-zone-overlay">
-            <FolderPlus size={28} />
+            <FolderPlus size={ICON.xl} />
             <span>Drop folder to add project</span>
           </div>
         )}
@@ -116,7 +115,7 @@ export function Projects(): JSX.Element {
         {activeProjects.length === 0 && archivedProjects.length === 0 && (
           <div className="empty" style={{ height: 'auto', padding: '40px 20px' }}>
             <div>
-              <Folder size={28} className="muted" />
+              <Folder size={ICON.xl} className="muted" />
               <p className="muted" style={{ marginTop: 10 }}>
                 No conversations found for this harness yet.
               </p>
@@ -142,14 +141,14 @@ export function Projects(): JSX.Element {
             disabled={selectedForArchive.length === 0}
             onClick={archiveSelected}
           >
-            <Archive size={12} /> Archive
+            <Archive size={ICON.xs} /> Archive
           </button>
         </div>
       )}
 
       <div className="active-harness">
         <div className="crest">
-          <BallPeenHammer size={16} />
+          <Hammer size={ICON.lg} />
         </div>
         <div>
           <div className="label-tech" style={{ fontSize: 9 }}>
@@ -214,21 +213,21 @@ function ProjectRow({
       <div className={`project-row ${checked ? 'checked' : ''} ${isSelected && !selectionMode ? 'selected' : ''}`} onClick={onRowClick}>
         {selectionMode && !archived ? (
           checked ? (
-            <CheckSquare size={14} className="copper" />
+            <CheckSquare size={ICON.sm} className="copper" />
           ) : (
-            <Square size={14} className="muted" />
+            <Square size={ICON.sm} className="muted" />
           )
         ) : open ? (
-          <ChevronDown size={14} />
+          <ChevronDown size={ICON.sm} />
         ) : (
-          <ChevronRight size={14} />
+          <ChevronRight size={ICON.sm} />
         )}
         <span className="pname" title={p.cwd}>
           {p.name}
         </span>
         {projectRunning && (
           <span className="run-badge" title="Agent is working in this project">
-            <ForgeAnvil size={18} />
+            <ForgeAnvil size={ICON.md} />
           </span>
         )}
         {archived ? (
@@ -241,7 +240,7 @@ function ProjectRow({
                 unarchive(key)
               }}
             >
-              <ArchiveRestore size={13} />
+              <ArchiveRestore size={ICON.sm} />
             </button>
             <button
               className="restore-btn"
@@ -251,7 +250,7 @@ function ProjectRow({
                 void deleteProject(p.encoded)
               }}
             >
-              <Trash2 size={13} />
+              <Trash2 size={ICON.sm} />
             </button>
           </div>
         ) : (
@@ -264,7 +263,7 @@ function ProjectRow({
                 void startNewChat(p.cwd)
               }}
             >
-              <Plus size={14} />
+              <Plus size={ICON.sm} />
             </button>
             <span className="pmeta">{p.sessions.length}</span>
           </div>
@@ -305,7 +304,7 @@ function SessionRow({
   })
   return (
     <div className={`session-row ${active ? 'active' : ''}`} onClick={onClick}>
-      <MessageSquare size={13} className="muted" />
+      <MessageSquare size={ICON.sm} className="muted" />
       <span className="stitle" title={sess.title}>
         {sess.title}
       </span>
@@ -326,8 +325,8 @@ function ArchiveSection({
   return (
     <div className="archive-section">
       <div className="archive-header" onClick={() => setOpen(!open)}>
-        {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-        <Archive size={13} />
+        {open ? <ChevronDown size={ICON.sm} /> : <ChevronRight size={ICON.sm} />}
+        <Archive size={ICON.sm} />
         <span className="label-tech">Archive</span>
         <span className="pmeta">{projects.length}</span>
       </div>

@@ -217,11 +217,57 @@ export interface UsageTotals {
 // File browser / preview
 // ---------------------------------------------------------------------------
 
+/**
+ * One entry in the file browser.
+ *
+ * Directories are listed lazily: a `dir` node arrives with `children` undefined and
+ * `loaded` false, and its contents are fetched only when the row is expanded. The
+ * tree used to be walked eagerly to depth 8 on every project/chat click, which
+ * froze the app outright for projects rooted at large or network-backed folders.
+ */
 export interface FileNode {
   name: string
   path: string
   type: 'file' | 'dir'
   children?: FileNode[]
+  /** dir only: children have been fetched (an empty dir is `loaded` with `children: []`). */
+  loaded?: boolean
+  /** dir only: a cheap hint for whether expanding is worthwhile. */
+  hasChildren?: boolean
+  /** dir only: the listing hit the per-directory entry cap, so it is incomplete. */
+  truncated?: boolean
+}
+
+/** Result of listing one directory level. */
+export interface DirListing {
+  path: string
+  nodes: FileNode[]
+  truncated: boolean
+}
+
+/**
+ * A bounded, flat list of paths under a project, used to recognise file references
+ * in the agent's replies. Separate from the visible tree, which is loaded lazily and
+ * so only knows the levels that happen to be expanded.
+ */
+export interface PathIndex {
+  cwd: string
+  paths: string[]
+  /** False when the walk stopped at its node cap or time budget. */
+  complete: boolean
+}
+
+/**
+ * Whether a project ended up watched. Some roots (`/`, the home directory, removable
+ * or network-backed volumes) cannot be watched recursively at any sane cost, so we
+ * decline rather than wedge the main process — and say so, instead of leaving the
+ * user wondering why nothing updates live.
+ */
+export interface WatchResult {
+  cwd: string
+  watching: boolean
+  /** Why watching was declined, for the UI to show. */
+  reason?: string
 }
 
 export type FileChangeType = 'add' | 'change' | 'unlink' | 'addDir' | 'unlinkDir'
@@ -519,6 +565,9 @@ export interface HephApi {
   /** Absolute path of a dropped File (replaces the removed `File.path`). */
   getPathForFile(file: File): string
 
+  /** The user's home directory, so the renderer can expand `~` in file references. */
+  readonly homeDir: string
+
   listHarnesses(): Promise<HarnessConfig[]>
   addHarness(input: { label: string; agentDir: string }): Promise<HarnessConfig[]>
   removeHarness(id: string): Promise<HarnessConfig[]>
@@ -534,9 +583,14 @@ export interface HephApi {
   loadSession(harnessId: string, path: string): Promise<SessionDetail>
   getModels(harnessId: string): Promise<ModelsConfig | null>
 
-  listFiles(cwd: string): Promise<FileNode[]>
+  /** Top level of a project only; deeper levels come from `listDir` on expand. */
+  listFiles(cwd: string): Promise<DirListing>
+  /** One directory level, for lazily expanding a tree node. */
+  listDir(path: string): Promise<DirListing>
+  /** Bounded background walk feeding file-reference recognition in chat. */
+  indexPaths(cwd: string): Promise<PathIndex>
   readFile(path: string): Promise<FileContent>
-  watchProject(cwd: string): Promise<void>
+  watchProject(cwd: string): Promise<WatchResult>
 
   browseFolder(): Promise<string | null>
   addProject(input: { harnessId: string; cwd: string }): Promise<ProjectSummary[]>

@@ -12,6 +12,8 @@ export const IPC = {
   getModels: 'harness:models',
 
   listFiles: 'file:list',
+  listDir: 'file:listDir',
+  indexPaths: 'file:indexPaths',
   readFile: 'file:read',
   watchProject: 'file:watch',
 

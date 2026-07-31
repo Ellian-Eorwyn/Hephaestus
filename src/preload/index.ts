@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
+import os from 'node:os'
 import { IPC } from '@shared/ipc'
 import type {
   HephApi,
@@ -13,6 +14,10 @@ const api: HephApi = {
   // the `File.path` property, so this is the supported replacement.
   getPathForFile: (file) => webUtils.getPathForFile(file),
 
+  // A plain value rather than a round-trip: the renderer needs it to expand `~` in
+  // file references the agent writes, on every rendered message.
+  homeDir: os.homedir(),
+
   listHarnesses: () => ipcRenderer.invoke(IPC.listHarnesses),
   addHarness: (input) => ipcRenderer.invoke(IPC.addHarness, input),
   removeHarness: (id) => ipcRenderer.invoke(IPC.removeHarness, id),
@@ -24,6 +29,8 @@ const api: HephApi = {
   getModels: (harnessId) => ipcRenderer.invoke(IPC.getModels, harnessId),
 
   listFiles: (cwd) => ipcRenderer.invoke(IPC.listFiles, cwd),
+  listDir: (path) => ipcRenderer.invoke(IPC.listDir, path),
+  indexPaths: (cwd) => ipcRenderer.invoke(IPC.indexPaths, cwd),
   readFile: (path) => ipcRenderer.invoke(IPC.readFile, path),
   watchProject: (cwd) => ipcRenderer.invoke(IPC.watchProject, cwd),
 

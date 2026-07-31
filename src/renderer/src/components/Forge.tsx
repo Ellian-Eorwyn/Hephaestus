@@ -4,6 +4,7 @@ import {
   Send,
   Square,
   Flame,
+  Hammer,
   Paperclip,
   X,
   Info,
@@ -20,10 +21,12 @@ import {
   type PendingPrompt,
   type Notice
 } from '../store/store'
+import { ICON, AVATAR_GLYPH } from '../lib/icons'
+import { resolveExplicit } from '../lib/filelinks'
+import { FileLink, useLinkContext } from './FileLink'
 import { MarkdownView } from './MarkdownView'
 import { StreamMarkdown } from './StreamMarkdown'
 import { ForgeAnvil } from './ForgeAnvil'
-import { BallPeenHammer } from './BallPeenHammer'
 import type { RunStatus, ThreadMessage } from '@shared/types'
 
 /** Which optional panes to render on a message. Passed down so each row doesn't subscribe. */
@@ -126,7 +129,7 @@ export function Forge(): JSX.Element {
       <div className="pane forge">
         <div className="empty">
           <div>
-            <Flame className="glyph" />
+            <Flame className="glyph" size={ICON.hero} />
             <h2>The forge is cold</h2>
             <p>Select a conversation from a project, or start a new one.</p>
           </div>
@@ -143,13 +146,13 @@ export function Forge(): JSX.Element {
     return (
       <div className="pane forge">
         <div className="pane-header">
-          <BallPeenHammer size={14} className="copper" />
+          <Hammer size={ICON.sm} className="copper" />
           <span className="label-tech">Forge — New Session</span>
         </div>
         <div className="pane-body">
           <div className="empty">
             <div>
-              <Flame className="glyph" />
+              <Flame className="glyph" size={ICON.hero} />
               <h2>Ready to forge</h2>
               <p>Type a prompt below to start a new conversation in this project.</p>
             </div>
@@ -163,7 +166,7 @@ export function Forge(): JSX.Element {
   return (
     <div className="pane forge">
       <div className="pane-header">
-        <BallPeenHammer size={14} className="copper" />
+        <Hammer size={ICON.sm} className="copper" />
         <span className="label-tech">{selectedSessionPath ? 'Forge — Session' : 'Forge — New Session'}</span>
       </div>
       <div className="pane-body" ref={bodyRef} onScroll={onScroll}>
@@ -201,7 +204,7 @@ export function Forge(): JSX.Element {
         )}
         {!pinned && (
           <button className="jump-bottom" title="Jump to latest" onClick={jumpToBottom}>
-            <ArrowDown size={13} />
+            <ArrowDown size={ICON.sm} />
             Latest
           </button>
         )}
@@ -312,7 +315,7 @@ function WorkingRow({
   return (
     <div className="msg assistant working">
       <div className="avatar">
-        <ForgeAnvil size={26} />
+        <ForgeAnvil size={AVATAR_GLYPH} />
       </div>
       <div className="body">
         <div className="working-head">
@@ -358,7 +361,7 @@ function SettledAssistant({
   return (
     <div className="msg assistant">
       <div className="avatar">
-        <BallPeenHammer size={16} />
+        <Hammer size={AVATAR_GLYPH} />
       </div>
       <div className="body">
         {thinking && showThinking && !text && (
@@ -402,7 +405,7 @@ function InteractivePrompt({ prompt }: { prompt: PendingPrompt }): JSX.Element {
   return (
     <div className="msg assistant">
       <div className="avatar">
-        <BallPeenHammer size={16} />
+        <Hammer size={AVATAR_GLYPH} />
       </div>
       <div className="body">
         <div className={`prompt-card ${req.method}`}>
@@ -514,12 +517,12 @@ function RetryCard({
   return (
     <div className="msg assistant">
       <div className="avatar">
-        <BallPeenHammer size={16} />
+        <Hammer size={AVATAR_GLYPH} />
       </div>
       <div className="body">
         <div className="retry-card">
           <div className="retry-head">
-            <AlertTriangle size={13} />
+            <AlertTriangle size={ICON.sm} />
             <span>
               Attempt {retry.attempt} of {retry.maxAttempts}
               {remaining > 0 ? ` — retrying in ${Math.ceil(remaining / 1000)}s` : ' — retrying now'}
@@ -541,12 +544,12 @@ function UnresponsiveCard({ runId }: { runId: string }): JSX.Element {
   return (
     <div className="msg assistant">
       <div className="avatar">
-        <BallPeenHammer size={16} />
+        <Hammer size={AVATAR_GLYPH} />
       </div>
       <div className="body">
         <div className="retry-card">
           <div className="retry-head">
-            <AlertTriangle size={13} />
+            <AlertTriangle size={ICON.sm} />
             <span>The harness stopped responding.</span>
             <button className="btn ghost" onClick={() => void restartRun(runId)}>
               Restart
@@ -572,10 +575,10 @@ function NoticeRow({ notice }: { notice: Notice }): JSX.Element {
   const Icon = notice.kind === 'error' ? XCircle : notice.kind === 'warning' ? AlertTriangle : Info
   return (
     <div className={`notice ${notice.kind}`}>
-      <Icon size={14} />
+      <Icon size={ICON.sm} />
       <span className="notice-msg">{notice.message}</span>
       <button className="notice-close" title="Dismiss" onClick={() => dismiss(notice.id)}>
-        <X size={12} />
+        <X size={ICON.xs} />
       </button>
     </div>
   )
@@ -602,7 +605,7 @@ const Message = memo(function Message({
           {m.text}
           {m.attachedFile && (
             <div className="attach-chip" title={m.attachedFile}>
-              <Paperclip size={11} />
+              <Paperclip size={ICON.xs} />
               {basename(m.attachedFile)}
             </div>
           )}
@@ -641,7 +644,7 @@ const Message = memo(function Message({
   return (
     <div className="msg assistant">
       <div className="avatar">
-        <BallPeenHammer size={16} />
+        <Hammer size={AVATAR_GLYPH} />
       </div>
       <div className="body">
         {showThinkingBlock && (
@@ -651,20 +654,41 @@ const Message = memo(function Message({
           </details>
         )}
         {m.text && <MarkdownView source={m.text} />}
-        {showToolBlocks &&
-          m.toolCalls!.map((tc) => (
-            <details className="toolblock" key={tc.id}>
-              <summary>⚙ {tc.name}</summary>
-              <div className="content">
-                <div className="toolargs">{formatArgs(tc.arguments)}</div>
-              </div>
-            </details>
-          ))}
+        {showToolBlocks && m.toolCalls!.map((tc) => <ToolCallBlock key={tc.id} call={tc} />)}
         <MsgStats m={m} />
       </div>
     </div>
   )
 })
+
+/**
+ * One tool call the agent made. When its arguments name a file, that path is shown
+ * as a link at the top of the block — the most direct "the agent touched this file,
+ * show me" affordance there is.
+ */
+function ToolCallBlock({
+  call
+}: {
+  call: NonNullable<ThreadMessage['toolCalls']>[number]
+}): JSX.Element {
+  const linkCtx = useLinkContext()
+  const raw = (call.arguments as { path?: unknown } | null)?.path
+  const ref = typeof raw === 'string' ? resolveExplicit(raw, linkCtx) : null
+
+  return (
+    <details className="toolblock">
+      <summary>⚙ {call.name}</summary>
+      <div className="content">
+        {ref && (
+          <div className="toolpath">
+            <FileLink path={ref.path} line={ref.line} variant="chip" />
+          </div>
+        )}
+        <div className="toolargs">{formatArgs(call.arguments)}</div>
+      </div>
+    </details>
+  )
+}
 
 /** Compact per-response stats line: output tokens, throughput, model. */
 function MsgStats({ m }: { m: ThreadMessage }): JSX.Element | null {
@@ -756,7 +780,7 @@ function Composer(): JSX.Element {
     <div className="composer">
       {showAttach && (
         <div className={`attach-bar ${attachViewedFile ? 'on' : 'off'}`}>
-          <Paperclip size={12} />
+          <Paperclip size={ICON.xs} />
           {attachViewedFile ? (
             <>
               <span>
@@ -764,7 +788,7 @@ function Composer(): JSX.Element {
                 will know you mean this file
               </span>
               <button className="attach-toggle" title="Don't attach" onClick={() => setAttachViewedFile(false)}>
-                <X size={12} />
+                <X size={ICON.xs} />
               </button>
             </>
           ) : (
@@ -781,7 +805,7 @@ function Composer(): JSX.Element {
         <div className="queue-bar" title="Held by the agent; it will run these in order">
           {queued.map((q, i) => (
             <span className="queue-chip" key={i}>
-              <CornerDownRight size={11} />
+              <CornerDownRight size={ICON.xs} />
               {q.length > 60 ? `${q.slice(0, 60)}…` : q}
             </span>
           ))}
@@ -807,7 +831,7 @@ function Composer(): JSX.Element {
         />
         {running && (
           <button className="send-btn ghost-btn" title="Stop this turn" onClick={() => void abort()}>
-            <Square size={15} />
+            <Square size={ICON.md} />
           </button>
         )}
         <button
@@ -816,7 +840,7 @@ function Composer(): JSX.Element {
           disabled={!canSend || !text.trim()}
           onClick={() => submit(running ? 'followUp' : undefined)}
         >
-          <Send size={16} />
+          <Send size={ICON.md} />
         </button>
       </div>
       {!canSend && selectedCwd && (
@@ -828,14 +852,19 @@ function Composer(): JSX.Element {
   )
 }
 
+/**
+ * Tool arguments, capped. A `write` call carries the entire file it is writing, so
+ * rendering these verbatim put an unbounded amount of text on screen — the same
+ * bound the tool *results* already had.
+ */
 function formatArgs(args: unknown): string {
   if (args && typeof args === 'object' && 'command' in args) {
-    return String((args as { command: unknown }).command)
+    return truncate(String((args as { command: unknown }).command), 6000)
   }
   try {
-    return JSON.stringify(args, null, 2)
+    return truncate(JSON.stringify(args, null, 2), 6000)
   } catch {
-    return String(args)
+    return truncate(String(args), 6000)
   }
 }
 

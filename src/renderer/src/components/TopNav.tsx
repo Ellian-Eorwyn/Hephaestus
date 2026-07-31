@@ -1,5 +1,6 @@
 import { Plus, Sun, Moon, PanelLeftClose, PanelLeft, Settings, X } from 'lucide-react'
 import { useStore } from '../store/store'
+import { ICON } from '../lib/icons'
 
 export function TopNav(): JSX.Element {
   const harnesses = useStore((s) => s.harnesses)
@@ -24,7 +25,7 @@ export function TopNav(): JSX.Element {
           title={zen ? 'Show sidebar' : 'Hide sidebar'}
           onClick={toggleZen}
         >
-          {zen ? <PanelLeft size={17} /> : <PanelLeftClose size={17} />}
+          {zen ? <PanelLeft size={ICON.md} /> : <PanelLeftClose size={ICON.md} />}
         </button>
       )}
       <nav className="nav-tabs">
@@ -56,20 +57,20 @@ export function TopNav(): JSX.Element {
                 void removeHarness(h.id)
               }}
             >
-              <X size={12} />
+              <X size={ICON.xs} />
             </span>
           </button>
         ))}
         <button className="nav-add" title="Register harness" onClick={() => setAddModal(true)}>
-          <Plus size={16} />
+          <Plus size={ICON.md} />
         </button>
       </nav>
       <div className="nav-right">
         <button className="icon-btn" title="Toggle theme" onClick={toggleTheme}>
-          {theme === 'dark' ? <Sun size={17} /> : <Moon size={17} />}
+          {theme === 'dark' ? <Sun size={ICON.md} /> : <Moon size={ICON.md} />}
         </button>
         <button className="icon-btn" title="Settings" onClick={() => useStore.getState().setSettingsModalOpen(true)}>
-          <Settings size={17} />
+          <Settings size={ICON.md} />
         </button>
       </div>
     </header>

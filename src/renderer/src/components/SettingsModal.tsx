@@ -1,4 +1,5 @@
 import { X } from 'lucide-react'
+import { ICON } from '../lib/icons'
 import { useStore } from '../store/store'
 
 export function SettingsModal(): JSX.Element | null {
@@ -22,7 +23,7 @@ export function SettingsModal(): JSX.Element | null {
         <header className="settings-head">
           <h3>Settings</h3>
           <button className="icon-btn" title="Close" onClick={() => setOpen(false)}>
-            <X size={18} />
+            <X size={ICON.lg} />
           </button>
         </header>
 

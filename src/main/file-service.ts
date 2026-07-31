@@ -1,4 +1,5 @@
 import { promises as fs } from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import * as XLSX from 'xlsx'
 import type {
@@ -6,13 +7,23 @@ import type {
   FileContent,
   FileChange,
   FileChangeType,
+  DirListing,
+  PathIndex,
   ProjectChangePayload,
-  SheetData
+  SheetData,
+  WatchResult
 } from '@shared/types'
 
 import chokidar from 'chokidar'
 
 const IGNORE = new Set(['.git', 'node_modules', '.DS_Store', '.venv', 'venv', '__pycache__', 'dist', 'out', '.next'])
+
+/**
+ * Directories that are ruinous to walk or watch and never interesting as project
+ * content: macOS system trees, app bundles, and the CloudStorage mount points that
+ * back Google Drive / iCloud (stat-ing those hits the network per entry).
+ */
+const HEAVY_DIRS = new Set(['Library', 'Applications', 'System', 'Volumes', 'private'])
 
 /**
  * chokidar `ignored` predicate covering noisy dirs and dotfiles (except the few we
@@ -31,13 +42,30 @@ function isIgnoredPath(root: string, p: string): boolean {
   for (const seg of rel.split(path.sep)) {
     if (!seg) continue
     if (IGNORE.has(seg)) return true
+    // Only *below* the root: a project legitimately living inside one of these
+    // (a Google Drive folder, say) still watches its own contents.
+    if (HEAVY_DIRS.has(seg)) return true
     if (seg.startsWith('.') && seg !== '.gitignore') return true
   }
   return false
 }
 
-/** Depth chokidar/readDir descend into a project before stopping. */
-const WATCH_DEPTH = 8
+/**
+ * Roots we refuse to watch recursively. `/` and the home directory fan out to
+ * hundreds of thousands of entries, and `/Volumes` paths are removable or network
+ * mounts where every stat can block. Sessions do exist with these as their cwd, so
+ * this is a real case, not a hypothetical one.
+ */
+function unwatchableRoot(root: string): string | null {
+  const p = path.resolve(root)
+  if (p === '/') return 'the filesystem root'
+  if (p === path.resolve(os.homedir())) return 'your home folder'
+  if (p === '/Volumes' || p === '/System' || p === '/Library') return 'a system folder'
+  return null
+}
+
+/** Depth chokidar descends into a project before stopping. */
+const WATCH_DEPTH = 3
 /** Coalescing window for filesystem bursts. */
 const CHANGE_DEBOUNCE_MS = 60
 /** Beyond this many distinct paths in one window we stop enumerating and flag overflow. */
@@ -48,6 +76,19 @@ const MAX_CHANGES = 200
  * recursive watcher alive until the app quit.
  */
 const MAX_WATCHERS = 3
+/**
+ * Entries returned for a single directory level. A cap rather than a full listing
+ * keeps one pathological folder (a downloads dir with 50k files) from swamping the
+ * IPC payload and the tree render.
+ */
+const MAX_DIR_ENTRIES = 2000
+/**
+ * Bounds on the background path index (see `indexPaths`). Generous enough to cover
+ * a real project whole, small enough that a project rooted at `/` or a home folder
+ * stops early instead of walking forever — the failure that froze the app.
+ */
+const INDEX_MAX_ENTRIES = 20_000
+const INDEX_MAX_MS = 1500
 
 const CODE_LANGS: Record<string, string> = {
   '.ts': 'typescript',
@@ -107,9 +148,69 @@ export class FileService {
   // file trees fresh — not a single watcher tied to the visible selection.
   private watchers = new Map<string, ProjectWatch>()
 
-  /** Build a file tree for the given cwd, recursing up to WATCH_DEPTH levels. */
-  async listFiles(cwd: string): Promise<FileNode[]> {
-    return this.readDir(cwd, WATCH_DEPTH)
+  /**
+   * Top level of a project. Deliberately one level deep: this used to recurse to
+   * depth 8, which for a project rooted at `/` or a home directory produced
+   * hundreds of thousands of nodes and hung the main process for minutes — the
+   * whole app froze on a chat click. Deeper levels arrive via `listDir` when a row
+   * is actually expanded.
+   */
+  async listFiles(cwd: string): Promise<DirListing> {
+    return this.listDir(cwd)
+  }
+
+  /** One directory level. Cheap and bounded, whatever the folder turns out to be. */
+  async listDir(dir: string): Promise<DirListing> {
+    return this.readDir(dir)
+  }
+
+  /**
+   * A flat list of paths under `cwd`, for resolving file references in the agent's
+   * replies. The visible tree is loaded lazily, so on its own it only knows the
+   * levels someone happened to expand — a path the agent names three folders down
+   * would never be recognised.
+   *
+   * Breadth-first under a node cap *and* a wall-clock deadline, so this stays a
+   * bounded background job: a normal project is indexed completely, and a
+   * pathological root simply stops early and reports `complete: false`.
+   */
+  async indexPaths(cwd: string): Promise<PathIndex> {
+    const root = path.resolve(cwd)
+    const deadline = Date.now() + INDEX_MAX_MS
+    const paths: string[] = []
+    let queue: string[] = [root]
+    let complete = true
+
+    while (queue.length) {
+      if (paths.length >= INDEX_MAX_ENTRIES || Date.now() > deadline) {
+        complete = false
+        break
+      }
+      const next: string[] = []
+      for (const dir of queue) {
+        if (paths.length >= INDEX_MAX_ENTRIES || Date.now() > deadline) {
+          complete = false
+          break
+        }
+        let entries
+        try {
+          entries = await fs.readdir(dir, { withFileTypes: true })
+        } catch {
+          continue
+        }
+        for (const e of entries) {
+          if (IGNORE.has(e.name)) continue
+          if (e.name.startsWith('.') && e.name !== '.gitignore') continue
+          const full = path.join(dir, e.name)
+          // Below the root only — a project that *is* a heavy dir still indexes.
+          if (isIgnoredPath(root, full)) continue
+          paths.push(full)
+          if (e.isDirectory()) next.push(full)
+        }
+      }
+      queue = next
+    }
+    return { cwd: root, paths, complete }
   }
 
   /**
@@ -120,13 +221,25 @@ export class FileService {
    * adopts the new callback rather than tearing the watcher down, so re-selecting
    * a project never disturbs a watcher a background run depends on.
    */
-  watch(cwd: string, onChange: (payload: ProjectChangePayload) => void): void {
+  watch(cwd: string, onChange: (payload: ProjectChangePayload) => void): WatchResult {
     const key = path.resolve(cwd)
+
+    // Some roots cannot be watched recursively at any sane cost. Declining (and
+    // saying so) beats wedging the main process on a tree we can never keep up with.
+    const unwatchable = unwatchableRoot(key)
+    if (unwatchable) {
+      return {
+        cwd: key,
+        watching: false,
+        reason: `Live updates are off — this project is ${unwatchable}, which is too large to watch.`
+      }
+    }
+
     const existing = this.watchers.get(key)
     if (existing) {
       existing.onChange = onChange
       existing.usedAt = Date.now()
-      return
+      return { cwd: key, watching: true }
     }
 
     // Coalesce rapid bursts but stay snappy. We deliberately do NOT use
@@ -180,6 +293,7 @@ export class FileService {
 
     this.watchers.set(key, entry)
     this.evictWatchers()
+    return { cwd: key, watching: true }
   }
 
   /** Close the least-recently-selected watchers once we're over the cap. */
@@ -202,25 +316,33 @@ export class FileService {
     this.watchers.clear()
   }
 
-  private async readDir(dir: string, depth: number): Promise<FileNode[]> {
+  /**
+   * Immediate children of one directory, capped at MAX_DIR_ENTRIES.
+   *
+   * Directories come back unloaded (`children: undefined`), so the cost of listing
+   * is one `readdir` regardless of how deep or how large the tree below it is.
+   */
+  private async readDir(dir: string): Promise<DirListing> {
+    const resolved = path.resolve(dir)
     let entries
     try {
-      entries = await fs.readdir(dir, { withFileTypes: true })
+      entries = await fs.readdir(resolved, { withFileTypes: true })
     } catch {
-      return []
+      return { path: resolved, nodes: [], truncated: false }
     }
+
     const nodes: FileNode[] = []
+    let truncated = false
     for (const e of entries) {
       if (IGNORE.has(e.name)) continue
       if (e.name.startsWith('.') && e.name !== '.gitignore') continue
-      const full = path.join(dir, e.name)
+      if (nodes.length >= MAX_DIR_ENTRIES) {
+        truncated = true
+        break
+      }
+      const full = path.join(resolved, e.name)
       if (e.isDirectory()) {
-        nodes.push({
-          name: e.name,
-          path: full,
-          type: 'dir',
-          children: depth > 0 ? await this.readDir(full, depth - 1) : []
-        })
+        nodes.push({ name: e.name, path: full, type: 'dir', loaded: false, hasChildren: true })
       } else if (e.isFile()) {
         nodes.push({ name: e.name, path: full, type: 'file' })
       }
@@ -229,7 +351,7 @@ export class FileService {
       if (a.type !== b.type) return a.type === 'dir' ? -1 : 1
       return a.name.localeCompare(b.name)
     })
-    return nodes
+    return { path: resolved, nodes, truncated }
   }
 
   async readFile(filePath: string): Promise<FileContent> {

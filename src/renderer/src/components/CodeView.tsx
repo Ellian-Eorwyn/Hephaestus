@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { getHighlighter, normalizeLang, DARK_THEME, LIGHT_THEME } from '../lib/highlighter'
 import { useStore } from '../store/store'
 
@@ -15,14 +15,25 @@ const MAX_HIGHLIGHT_BYTES = 300_000
 export function CodeView({
   code,
   language,
-  path
+  path,
+  line
 }: {
   code: string
   language?: string
   path?: string
+  /** 1-based line to scroll to and highlight, from a `file.ts:42` style reference. */
+  line?: number
 }): JSX.Element {
   const theme = useStore((s) => s.theme)
   const [lines, setLines] = useState<Line[] | null>(null)
+  const targetRef = useRef<HTMLTableRowElement>(null)
+
+  // Scroll only once the rows exist — highlighting resolves asynchronously, so on
+  // first paint there is nothing to scroll to yet.
+  useEffect(() => {
+    if (!lines || !line) return
+    targetRef.current?.scrollIntoView({ block: 'center' })
+  }, [lines, line, path])
 
   // Switching files must drop the previous file's tokens, which would otherwise
   // stay on screen for a frame. A *content* change deliberately keeps them, so a
@@ -68,24 +79,27 @@ export function CodeView({
     <div className="codeview">
       <table>
         <tbody>
-          {lines.map((line, i) => (
-            <tr key={i}>
-              <td className="ln">{i + 1}</td>
-              <td className="lc">
-                <pre>
-                  {line.tokens.length === 0 ? (
-                    ' '
-                  ) : (
-                    line.tokens.map((t, j) => (
-                      <span key={j} style={t.color ? { color: t.color } : undefined}>
-                        {t.content}
-                      </span>
-                    ))
-                  )}
-                </pre>
-              </td>
-            </tr>
-          ))}
+          {lines.map((l, i) => {
+            const isTarget = line === i + 1
+            return (
+              <tr key={i} ref={isTarget ? targetRef : undefined} className={isTarget ? 'target' : undefined}>
+                <td className="ln">{i + 1}</td>
+                <td className="lc">
+                  <pre>
+                    {l.tokens.length === 0 ? (
+                      ' '
+                    ) : (
+                      l.tokens.map((t, j) => (
+                        <span key={j} style={t.color ? { color: t.color } : undefined}>
+                          {t.content}
+                        </span>
+                      ))
+                    )}
+                  </pre>
+                </td>
+              </tr>
+            )
+          })}
         </tbody>
       </table>
     </div>

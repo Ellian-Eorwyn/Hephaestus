@@ -19,6 +19,8 @@ import type {
   ExtensionUIResponse
 } from '@shared/types'
 import { wrapWithViewingContext } from '@shared/viewing-context'
+import { isInside, resolveProjectPath } from '@shared/paths'
+import { ancestorDirs, collectPaths, loadedDirs, mergeListing, setChildren } from '../lib/filetree'
 
 const heph = window.heph
 
@@ -247,23 +249,31 @@ function wireSubscriptions(
       if (!samePath(st.selectedCwd, payload.cwd)) return
 
       // Only a structural change moves the tree. A plain content edit — which is
-      // what the agent does most — leaves the listing identical, so re-reading a
-      // depth-8 directory tree for it is pure waste.
+      // what the agent does most — leaves the listing identical, so re-listing for
+      // it is pure waste.
       const structural =
         payload.overflow || payload.changes.some((c) => c.type !== 'change')
       // A mass event (an install, a branch switch) reaches us as a trickle of
       // bursts rather than one, so collapse overlapping re-lists into one pass.
+      // Only the levels that are actually open get re-listed — the tree below a
+      // collapsed folder is not loaded, so there is nothing there to refresh.
       if (structural && !relistInFlight) {
         relistInFlight = true
-        heph
-          .listFiles(payload.cwd)
-          .then((fileTree) => {
-            if (samePath(get().selectedCwd, payload.cwd)) set({ fileTree })
-          })
-          .catch(() => {})
-          .finally(() => {
+        void (async () => {
+          try {
+            const listing = await heph.listFiles(payload.cwd)
+            if (!samePath(get().selectedCwd, payload.cwd)) return
+            set((s) => ({ fileTree: mergeRootListing(s.fileTree, listing.nodes) }))
+            const touched = new Set(payload.changes.map((c) => parentDir(c.path)))
+            for (const dir of loadedDirs(get().fileTree)) {
+              if (payload.overflow || touched.has(dir)) await refreshDir(dir, set, get)
+            }
+          } catch {
+            // ignore
+          } finally {
             relistInFlight = false
-          })
+          }
+        })()
       }
 
       // Reload the open file. This is the step that was missing: the watcher fired
@@ -339,6 +349,182 @@ function wireSubscriptions(
   })
 }
 
+/**
+ * Bumped on every project/session selection. An in-flight load compares against it
+ * before committing, so a slow response for a chat the user has already clicked away
+ * from is discarded instead of overwriting the one they're looking at.
+ */
+let selectionSeq = 0
+
+/**
+ * Point the inspector at a project: watch it, list its top level, and reset the
+ * open file. Only the *top* level is listed — see `FileService.listFiles`; deeper
+ * levels load when a row is expanded.
+ *
+ * Never awaited by the caller on the chat path, so a slow filesystem can't hold up
+ * the conversation.
+ */
+async function openProjectFiles(
+  cwd: string,
+  set: (patch: Partial<State> | ((s: State) => Partial<State>)) => void,
+  get: () => State
+): Promise<void> {
+  const seq = selectionSeq
+  set({
+    fileTreeLoading: true,
+    fileTree: [],
+    expandedDirs: {},
+    loadingDirs: {},
+    projectIndex: new Set<string>(),
+    watchNotice: null,
+    selectedFile: null,
+    selectedFileLine: null,
+    fileContent: null,
+    fileMissing: false
+  })
+
+  // Recognising file references in chat needs to see deeper than the visible tree,
+  // so a bounded walk runs alongside — never awaited, so a slow one can't hold up
+  // either the listing or the conversation.
+  void heph
+    .indexPaths(cwd)
+    .then((index) => {
+      if (seq !== selectionSeq || !samePath(get().selectedCwd, cwd)) return
+      set({ projectIndex: new Set(index.paths) })
+    })
+    .catch(() => {})
+
+  try {
+    const [watch, listing] = await Promise.all([
+      heph.watchProject(cwd).catch(() => null),
+      heph.listFiles(cwd)
+    ])
+    // A newer selection landed while we were listing — its own call owns the state.
+    if (seq !== selectionSeq || !samePath(get().selectedCwd, cwd)) return
+    set({
+      fileTree: listing.nodes,
+      watchNotice: watch && !watch.watching ? (watch.reason ?? null) : null
+    })
+  } catch {
+    if (seq !== selectionSeq) return
+    set({ fileTree: [] })
+  } finally {
+    if (seq === selectionSeq) set({ fileTreeLoading: false })
+  }
+}
+
+/** Fetch a directory's children once; a second call for a loaded dir is a no-op. */
+async function loadDirOnce(
+  dirPath: string,
+  set: (patch: Partial<State> | ((s: State) => Partial<State>)) => void,
+  get: () => State
+): Promise<void> {
+  const node = findDir(get().fileTree, dirPath)
+  if (node?.loaded || get().loadingDirs[dirPath]) return
+  await refreshDir(dirPath, set, get)
+}
+
+/** (Re-)list one directory level and splice it into the tree. */
+async function refreshDir(
+  dirPath: string,
+  set: (patch: Partial<State> | ((s: State) => Partial<State>)) => void,
+  get: () => State
+): Promise<void> {
+  const cwd = get().selectedCwd
+  set((s) => ({ loadingDirs: { ...s.loadingDirs, [dirPath]: true } }))
+  try {
+    const listing = await heph.listDir(dirPath)
+    // The project may have changed under us while the listing was in flight.
+    if (!samePath(get().selectedCwd, cwd)) return
+    set((s) => ({
+      fileTree: setChildren(s.fileTree, dirPath, listing.nodes, listing.truncated)
+    }))
+  } catch {
+    // A directory that vanished or can't be read: leave it collapsed.
+  } finally {
+    set((s) => {
+      const loadingDirs = { ...s.loadingDirs }
+      delete loadingDirs[dirPath]
+      return { loadingDirs }
+    })
+  }
+}
+
+/** The `dir` node at `target`, searching only loaded levels. */
+function findDir(nodes: FileNode[], target: string): FileNode | null {
+  for (const n of nodes) {
+    if (n.path === target) return n.type === 'dir' ? n : null
+    if (n.children) {
+      const hit = findDir(n.children, target)
+      if (hit) return hit
+    }
+  }
+  return null
+}
+
+/** Merge a fresh root listing over the current one, keeping expanded subtrees. */
+function mergeRootListing(prev: FileNode[], fresh: FileNode[]): FileNode[] {
+  return mergeListing(prev, fresh)
+}
+
+/**
+ * Every path we know about in the current project — the background index plus
+ * whatever the visible tree has loaded — as the validator for path-shaped strings
+ * in an agent's reply.
+ *
+ * Cached on the identities of both inputs, so the union is built once per change
+ * rather than once per rendered message: this is read by every markdown block.
+ */
+const treePathCache = new WeakMap<FileNode[], Set<string>>()
+let knownCache: {
+  tree: FileNode[]
+  index: Set<string>
+  value: { known: Set<string>; byBasename: Map<string, string> }
+} | null = null
+
+export function selectKnownPaths(s: State): {
+  known: Set<string>
+  byBasename: Map<string, string>
+} {
+  if (knownCache && knownCache.tree === s.fileTree && knownCache.index === s.projectIndex) {
+    return knownCache.value
+  }
+  let fromTree = treePathCache.get(s.fileTree)
+  if (!fromTree) {
+    fromTree = collectPaths(s.fileTree)
+    treePathCache.set(s.fileTree, fromTree)
+  }
+  // The index usually covers the tree, so start from it and add anything the tree
+  // has that the (bounded) walk missed.
+  const known = new Set(s.projectIndex)
+  for (const p of fromTree) known.add(p)
+
+  // Basenames that occur exactly once. A name seen twice is dropped outright
+  // rather than resolved to an arbitrary one of its candidates.
+  const byBasename = new Map<string, string>()
+  const ambiguous = new Set<string>()
+  for (const p of known) {
+    const name = p.slice(p.lastIndexOf('/') + 1)
+    if (ambiguous.has(name)) continue
+    if (byBasename.has(name)) {
+      byBasename.delete(name)
+      ambiguous.add(name)
+    } else {
+      byBasename.set(name, p)
+    }
+  }
+
+  const value = { known, byBasename }
+  knownCache = { tree: s.fileTree, index: s.projectIndex, value }
+  return value
+}
+
+/** Containing directory of an absolute path (renderer has no `node:path`). */
+function parentDir(p: string): string {
+  const idx = p.replace(/\/+$/, '').lastIndexOf('/')
+  return idx <= 0 ? '/' : p.slice(0, idx)
+}
+
 /** How long an agent edit stays interesting enough to keep in the map. */
 const AGENT_EDIT_TTL_MS = 5 * 60_000
 
@@ -372,8 +558,9 @@ function collectEditedPaths(events: AgentStreamEvent[], cwd: string): string[] {
     const raw = e.type === 'tool_execution_start' ? e.args?.path : undefined
     if (typeof raw !== 'string' || !raw) continue
     // Tool paths are normally absolute; resolve the occasional relative one
-    // against the run's working directory (no node:path in the renderer).
-    out.push(raw.startsWith('/') ? raw : `${cwd.replace(/\/+$/, '')}/${raw.replace(/^\.\//, '')}`)
+    // against the run's working directory.
+    const abs = resolveProjectPath(cwd, raw, heph.homeDir)
+    if (abs) out.push(abs)
   }
   return out
 }
@@ -541,7 +728,29 @@ interface State {
 
   // inspector
   fileTree: FileNode[]
+  /** True while the top level of a newly-selected project is being listed. */
+  fileTreeLoading: boolean
+  /**
+   * Which directories are open, keyed by absolute path. Lifted out of the tree rows
+   * so a file the agent links to can be revealed from outside the component — and
+   * so the expansion survives a refresh of the listing.
+   */
+  expandedDirs: Record<string, boolean>
+  /** Directories with a `listDir` in flight, so a row can show it's working. */
+  loadingDirs: Record<string, boolean>
+  /**
+   * Bounded flat index of paths under the project, built in the background after a
+   * project opens. Only feeds file-reference recognition in chat — the visible tree
+   * stays lazy, so on its own it would only know the levels someone expanded.
+   */
+  projectIndex: Set<string>
+  /** Set when a project root is too large to watch; shown as a note in the pane. */
+  watchNotice: string | null
   selectedFile: string | null
+  /** Line to scroll to in the preview, from a `path:42` style reference. */
+  selectedFileLine: number | null
+  /** A file just revealed by a link; the matching tree row scrolls itself into view. */
+  revealTarget: string | null
   fileContent: FileContent | null
   /** The open file was deleted on disk; its last content is still shown. */
   fileMissing: boolean
@@ -608,8 +817,17 @@ interface State {
   unarchive: (key: string) => void
   deleteProject: (encoded: string) => Promise<void>
   selectSession: (harnessId: string, path: string, cwd: string) => Promise<void>
-  selectFile: (path: string) => Promise<void>
+  selectFile: (path: string, line?: number) => Promise<void>
   refreshFiles: () => Promise<void>
+  /** Expand/collapse a directory row, fetching its children the first time. */
+  toggleDir: (path: string) => Promise<void>
+  /**
+   * Open a file the agent referenced: expand and load its ancestors, select it in
+   * the tree, and show it in the preview (optionally scrolled to `line`).
+   */
+  revealFile: (path: string, line?: number) => Promise<void>
+  /** Consume the reveal marker once the tree row has scrolled itself into view. */
+  clearRevealTarget: () => void
   setAttachViewedFile: (on: boolean) => void
   refreshBackend: (harnessId: string) => Promise<void>
   addProject: (cwd: string) => Promise<void>
@@ -684,7 +902,14 @@ export const useStore = create<State>((set, get) => {
   draftRestore: null,
 
   fileTree: [],
+  fileTreeLoading: false,
+  expandedDirs: {},
+  loadingDirs: {},
+  projectIndex: new Set<string>(),
+  watchNotice: null,
   selectedFile: null,
+  selectedFileLine: null,
+  revealTarget: null,
   fileContent: null,
   fileMissing: false,
   agentEdits: {},
@@ -854,33 +1079,15 @@ export const useStore = create<State>((set, get) => {
     set((s) => ({ expanded: { ...s.expanded, [p.encoded]: !s.expanded[p.encoded] } })),
 
   selectProject: async (cwd) => {
-    set({
-      selectedCwd: cwd,
-      selectedSessionPath: null,
-      session: null
-    })
-    try {
-      void heph.watchProject(cwd)
-      const fileTree = await heph.listFiles(cwd)
-      set({ fileTree, selectedFile: null, fileContent: null })
-    } catch {
-      set({ fileTree: [], selectedFile: null, fileContent: null })
-    }
+    selectionSeq++
+    set({ selectedCwd: cwd, selectedSessionPath: null, session: null, loadingSession: false })
+    await openProjectFiles(cwd, set, get)
   },
 
   startNewChat: async (cwd) => {
-    set({
-      selectedCwd: cwd,
-      selectedSessionPath: null,
-      session: null
-    })
-    try {
-      void heph.watchProject(cwd)
-      const fileTree = await heph.listFiles(cwd)
-      set({ fileTree, selectedFile: null, fileContent: null })
-    } catch {
-      set({ fileTree: [], selectedFile: null, fileContent: null })
-    }
+    selectionSeq++
+    set({ selectedCwd: cwd, selectedSessionPath: null, session: null, loadingSession: false })
+    await openProjectFiles(cwd, set, get)
   },
 
   toggleSelectionMode: () =>
@@ -920,37 +1127,99 @@ export const useStore = create<State>((set, get) => {
   },
 
   selectSession: async (harnessId, path, cwd) => {
-    set({ selectedSessionPath: path, selectedCwd: cwd, loadingSession: true })
-    const session = await heph.loadSession(harnessId, path)
-    set({ session, loadingSession: false })
-    // Load the file tree for this project's cwd.
+    // Clearing `session` matters: it used to be left in place, so a slow or failed
+    // load left the *previous* conversation on screen underneath the newly
+    // highlighted row — which reads as the app having lost the chat.
+    const seq = ++selectionSeq
+    set({
+      selectedSessionPath: path,
+      selectedCwd: cwd,
+      session: null,
+      loadingSession: true
+    })
+
+    // The file listing is deliberately not awaited here: the conversation should
+    // appear as soon as it is parsed, whatever the project folder turns out to be.
+    void openProjectFiles(cwd, set, get)
+
     try {
-      void heph.watchProject(cwd)
-      const fileTree = await heph.listFiles(cwd)
-      set({ fileTree, selectedFile: null, fileContent: null })
-    } catch {
-      set({ fileTree: [], selectedFile: null, fileContent: null })
+      const session = await heph.loadSession(harnessId, path)
+      if (seq !== selectionSeq) return // superseded by a later click
+      set({ session })
+    } catch (err) {
+      if (seq !== selectionSeq) return
+      // Never leave the pane spinning on a session that can't be read (deleted,
+      // truncated, or on a volume that went away).
+      const reason = err instanceof Error ? err.message : 'Could not read this session file.'
+      set({
+        session: {
+          path,
+          header: { type: 'session', cwd },
+          messages: [{ id: `sys-${Date.now()}`, role: 'system', text: `⚠ ${reason}` }],
+          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: 0 },
+          contextWindow: null,
+          currentContextTokens: 0
+        }
+      })
+    } finally {
+      if (seq === selectionSeq) set({ loadingSession: false })
     }
   },
 
-  selectFile: async (path) => {
+  selectFile: async (path, line) => {
     // Opening a new file applies the auto-attach default (Settings).
-    set({ selectedFile: path, attachViewedFile: get().autoAttachFile, fileMissing: false })
+    set({
+      selectedFile: path,
+      selectedFileLine: line ?? null,
+      attachViewedFile: get().autoAttachFile,
+      fileMissing: false
+    })
     try {
       const fileContent = await heph.readFile(path)
+      if (get().selectedFile !== path) return
       set({ fileContent })
     } catch {
+      if (get().selectedFile !== path) return
       set({ fileContent: null, fileMissing: true })
     }
   },
+
+  toggleDir: async (dirPath) => {
+    const open = !!get().expandedDirs[dirPath]
+    set((s) => ({ expandedDirs: { ...s.expandedDirs, [dirPath]: !open } }))
+    if (open) return
+    await loadDirOnce(dirPath, set, get)
+  },
+
+  revealFile: async (path, line) => {
+    const cwd = get().selectedCwd
+    // Walk down from the project root, loading each level, so a file nested a few
+    // folders deep can be revealed even though nothing below the root is listed yet.
+    if (cwd && isInside(cwd, path)) {
+      for (const dir of ancestorDirs(cwd, path)) {
+        set((s) => ({ expandedDirs: { ...s.expandedDirs, [dir]: true } }))
+        await loadDirOnce(dir, set, get)
+      }
+    }
+    set({ revealTarget: path })
+    await get().selectFile(path, line)
+  },
+
+  clearRevealTarget: () => set({ revealTarget: null }),
 
   refreshFiles: async () => {
     const cwd = get().selectedCwd
     if (!cwd) return
     try {
       void heph.watchProject(cwd)
-      const fileTree = await heph.listFiles(cwd)
-      set({ fileTree })
+      // Re-list the root plus every directory the user has open, so a refresh sees
+      // new files at any expanded level without walking the parts nobody opened.
+      const listing = await heph.listFiles(cwd)
+      if (!samePath(get().selectedCwd, cwd)) return
+      set((s) => ({ fileTree: mergeRootListing(s.fileTree, listing.nodes) }))
+      for (const dir of loadedDirs(get().fileTree)) {
+        await refreshDir(dir, set, get)
+      }
       // Refresh means refresh: re-read the open file too, not just the listing.
       const open = get().selectedFile
       if (open) {
@@ -1244,8 +1513,13 @@ export const useStore = create<State>((set, get) => {
     }
 
     const { selectedSessionPath, selectedCwd } = get()
-    const viewing =
-      samePath(path, selectedSessionPath) || (selectedSessionPath === null && selectedCwd != null)
+    // A new chat has no session path yet, so a file appearing in *this project* is
+    // how it gets adopted. Requiring the project to match matters: without it every
+    // session file that changed anywhere in the harness was fully re-parsed and
+    // loaded while a new chat was open.
+    const adoptable =
+      selectedSessionPath === null && selectedCwd != null && samePath(summary?.cwd, selectedCwd)
+    const viewing = samePath(path, selectedSessionPath) || adoptable
 
     // While *our* run is streaming this session, the stream is the source of truth
     // and the file lags behind it — reloading per tick would re-parse the thread

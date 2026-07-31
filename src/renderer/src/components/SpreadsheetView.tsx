@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
 import { ChevronUp, ChevronDown } from 'lucide-react'
+import { ICON } from '../lib/icons'
 import type { SheetData } from '@shared/types'
 
 /** Convert a 0-based column index to a spreadsheet letter (A, B, …, AA). */
@@ -169,8 +170,8 @@ function SheetTable({ sheet }: { sheet: SheetData }): JSX.Element {
                 title={`Sort by ${header[c] ?? colLabel(c)}`}
               >
                 <span className="sheet-head-text">{header[c] ?? ''}</span>
-                {sort.col === c && sort.dir === 'asc' && <ChevronUp size={12} className="sort-icon" />}
-                {sort.col === c && sort.dir === 'desc' && <ChevronDown size={12} className="sort-icon" />}
+                {sort.col === c && sort.dir === 'asc' && <ChevronUp size={ICON.xs} className="sort-icon" />}
+                {sort.col === c && sort.dir === 'desc' && <ChevronDown size={ICON.xs} className="sort-icon" />}
                 <span
                   className="col-resize-handle"
                   onMouseDown={(e) => onResizeStart(e, c)}
