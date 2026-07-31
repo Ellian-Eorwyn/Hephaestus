@@ -12,6 +12,7 @@ export function SettingsModal(): JSX.Element | null {
   const showTools = useStore((s) => s.showTools)
   const showToolResults = useStore((s) => s.showToolResults)
   const autoAttachFile = useStore((s) => s.autoAttachFile)
+  const fileLinkGuidance = useStore((s) => s.fileLinkGuidance)
   const reduceMotion = useStore((s) => s.reduceMotion)
   const updateSettings = useStore((s) => s.updateSettings)
 
@@ -82,6 +83,16 @@ export function SettingsModal(): JSX.Element | null {
               desc="Reference the open file in new prompts by default"
             >
               <Toggle on={autoAttachFile} onChange={(v) => updateSettings({ autoAttachFile: v })} />
+            </SettingRow>
+
+            <SettingRow
+              label="Ask for clickable file paths"
+              desc="Adds a short note to each prompt so files the agent names open in the preview. Costs a few tokens per message."
+            >
+              <Toggle
+                on={fileLinkGuidance}
+                onChange={(v) => updateSettings({ fileLinkGuidance: v })}
+              />
             </SettingRow>
           </section>
         </div>

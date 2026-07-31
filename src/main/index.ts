@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, type IpcMainInvokeEvent } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, shell, type IpcMainInvokeEvent } from 'electron'
 import path from 'node:path'
 import { promises as fs } from 'node:fs'
 import { IPC } from '@shared/ipc'
@@ -170,6 +170,25 @@ function registerIpc(): void {
       send(IPC.evtProjectChanged, payload)
     })
   )
+
+  /**
+   * Open a web link from a reply in the user's browser.
+   *
+   * The URL comes out of model output, so the scheme allowlist is the security
+   * boundary, not a formality: `openExternal` hands anything else to whatever
+   * system handler claims the scheme. Only http(s) gets through, and a URL that
+   * doesn't parse is dropped silently — there is nothing useful to tell the user
+   * about a malformed link they didn't write.
+   */
+  ipcMain.handle(IPC.openExternal, async (_e, url: string) => {
+    try {
+      const parsed = new URL(url)
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return
+      await shell.openExternal(parsed.href)
+    } catch {
+      // not a URL, or the OS declined to open it
+    }
+  })
 
   ipcMain.handle(IPC.browseFolder, async () => {
     const result = await dialog.showOpenDialog({

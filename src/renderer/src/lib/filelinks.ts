@@ -21,6 +21,12 @@ export interface FileRef {
   path: string
   /** 1-based line, when the reference carried one. */
   line?: number
+  /**
+   * Set when the path lands inside the project but matches nothing we have listed.
+   * Still worth linking — the agent may be naming a file it created moments ago —
+   * but the UI shouldn't promise it opens.
+   */
+  unverified?: true
 }
 
 export interface LinkContext {
@@ -57,12 +63,22 @@ export function pathScanner(): RegExp {
  * agent may well be linking a file it just created.
  */
 export function resolveExplicit(raw: string, ctx: LinkContext): FileRef | null {
-  const { path: bare, line } = splitLineSuffix(raw.trim())
+  // A `file:///abs/path` href is a path wearing a scheme, and `resolveProjectPath`
+  // refuses anything with one. Models that know links exist write this form often
+  // enough that rejecting it throws away a whole class of correct references.
+  const { path: bare, line } = splitLineSuffix(raw.trim().replace(/^file:\/\//, ''))
   if (!bare) return null
   const abs = resolveProjectPath(ctx.cwd, bare, ctx.home)
-  if (!abs) return null
-  if (ctx.known.has(abs)) return { path: abs, line }
-  if (ctx.cwd && isInside(ctx.cwd, abs)) return { path: abs, line }
+  if (abs && ctx.known.has(abs)) return { path: abs, line }
+
+  // A bare filename resolves the same way in an href as it does in prose.
+  // `[Forge.tsx](Forge.tsx)` is a shape agents write constantly, and joining it onto
+  // the project root yields a file that has never existed — dead links, every time.
+  if (!bare.includes('/')) {
+    const unique = ctx.byBasename.get(bare)
+    if (unique) return { path: unique, line }
+  }
+  if (abs && ctx.cwd && isInside(ctx.cwd, abs)) return { path: abs, line, unverified: true }
   return null
 }
 
@@ -85,6 +101,27 @@ export function resolveGuess(raw: string, ctx: LinkContext): FileRef | null {
     if (unique) return { path: unique, line }
   }
   return null
+}
+
+/**
+ * Resolve a backticked reference: everything `resolveGuess` accepts, plus an exact
+ * match on a name the path shape rejects.
+ *
+ * `Makefile`, `Dockerfile` and `.gitignore` carry neither a separator nor an
+ * extension, so `PATH_RE` never fires on them — yet agents name them constantly.
+ * Widening the regex isn't the answer, because it is also what stops ordinary prose
+ * from sprouting underlines. Backticks are where the extra latitude is safe: the
+ * string has to equal a filename occurring exactly once in the project, and someone
+ * wrote it as code deliberately. Prose keeps the stricter rule, where a lone word is
+ * far more likely to be a word.
+ */
+export function resolveInlineCode(raw: string, ctx: LinkContext): FileRef | null {
+  const hit = resolveGuess(raw, ctx)
+  if (hit) return hit
+  const trimmed = raw.trim()
+  if (!trimmed || /\s|\//.test(trimmed)) return null
+  const unique = ctx.byBasename.get(trimmed)
+  return unique ? { path: unique } : null
 }
 
 /** Cheap shape test used before the (more expensive) tree lookup. */

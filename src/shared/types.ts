@@ -592,6 +592,9 @@ export interface HephApi {
   readFile(path: string): Promise<FileContent>
   watchProject(cwd: string): Promise<WatchResult>
 
+  /** Open a web link in the user's browser. Main allows http(s) only. */
+  openExternal(url: string): Promise<void>
+
   browseFolder(): Promise<string | null>
   addProject(input: { harnessId: string; cwd: string }): Promise<ProjectSummary[]>
   removeProject(input: { harnessId: string; encoded: string }): Promise<void>

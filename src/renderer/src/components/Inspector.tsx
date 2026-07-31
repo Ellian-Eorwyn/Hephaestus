@@ -257,10 +257,17 @@ function Preview(): JSX.Element {
         </span>
         {flash && <span className="edit-chip">agent edited</span>}
       </div>
+      {/* Two different failures share this flag, and surviving content is exactly what
+          tells them apart: the watcher's `unlink` path keeps the last bytes on screen,
+          while a read that never succeeded — a link to a path the agent invented —
+          nulls them. Saying "deleted" for the second one sent people looking for a
+          file that was never there. */}
       {fileMissing && (
         <div className="file-missing">
           <AlertTriangle size={ICON.xs} />
-          This file was deleted on disk. Showing the last version read.
+          {fileContent
+            ? 'This file was deleted on disk. Showing the last version read.'
+            : 'That path isn’t there — the agent may have named a file that doesn’t exist.'}
         </div>
       )}
       <div

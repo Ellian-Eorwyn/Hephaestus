@@ -2,8 +2,8 @@ import { useMemo } from 'react'
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown'
 import type { PluggableList } from 'unified'
 import remarkGfm from 'remark-gfm'
-import { resolveExplicit, resolveGuess } from '../lib/filelinks'
-import { FILE_SENTINEL, remarkFilePaths } from '../lib/remark-file-paths'
+import { resolveExplicit, resolveInlineCode } from '../lib/filelinks'
+import { FILE_SENTINEL, parseFileSentinel, remarkFilePaths } from '../lib/remark-file-paths'
 import { FileLink, useLinkContext } from './FileLink'
 
 /** Sentinel protocol `preprocessObsidian` puts on a wikilink's href. */
@@ -48,16 +48,41 @@ export function MarkdownBody({ source }: { source: string }): JSX.Element {
             return <span className="wikilink">{children}</span>
           }
           // A path we spotted in prose, or a link the agent wrote pointing at a
-          // file in this project: clicking opens it in the preview pane.
-          const raw = href?.startsWith(FILE_SENTINEL)
-            ? decodeURIComponent(href.slice(FILE_SENTINEL.length))
+          // file in this project: clicking opens it in the preview pane. A sentinel
+          // href was resolved by the remark plugin and is taken as-is — re-resolving
+          // it here would lose a `byBasename` hit the plugin had already made.
+          const ref = href?.startsWith(FILE_SENTINEL)
+            ? parseFileSentinel(href)
             : href
-          const ref = raw ? resolveExplicit(raw, linkCtx) : null
+              ? resolveExplicit(href, linkCtx)
+              : null
           if (ref) {
-            return <FileLink path={ref.path} line={ref.line} label={nodeText(children) ?? undefined} />
+            return (
+              <FileLink
+                path={ref.path}
+                line={ref.line}
+                unverified={ref.unverified}
+                label={nodeText(children) ?? undefined}
+              />
+            )
           }
+          // Not a file: a web link opens in the real browser, and anything else
+          // stays inert. Navigating the renderer itself is never right — it would
+          // replace the app with the page.
+          const web = isWebUrl(href)
           return (
-            <a href={href} {...props} onClick={(e) => e.preventDefault()}>
+            <a
+              href={href}
+              {...props}
+              // The label is the agent's to choose and need not match where the link
+              // goes, so the real destination is always one hover away.
+              title={web ? href : undefined}
+              className={web ? undefined : 'inert'}
+              onClick={(e) => {
+                e.preventDefault()
+                if (web && href) void window.heph.openExternal(href)
+              }}
+            >
               {children}
             </a>
           )
@@ -67,8 +92,11 @@ export function MarkdownBody({ source }: { source: string }): JSX.Element {
         // inline code is left alone.
         code({ className, children, node: _node, ...props }) {
           const text = nodeText(children)
-          if (text && !className) {
-            const ref = resolveGuess(text, linkCtx)
+          // A fence with no info string reaches this renderer without a className
+          // too, and its body is a whole code block — never a reference, however
+          // path-shaped a one-line body might look.
+          if (text && !className && !text.includes('\n')) {
+            const ref = resolveInlineCode(text, linkCtx)
             if (ref) {
               return <FileLink path={ref.path} line={ref.line} label={text} variant="code" />
             }
@@ -97,6 +125,21 @@ function nodeText(children: React.ReactNode): string | null {
     return children[0]
   }
   return null
+}
+
+/**
+ * True for a link `openExternal` will actually accept. Deliberately no base URL: a
+ * relative href resolved against the renderer's own location would turn an
+ * unrecognised path into a `localhost` link and open the dev server in a browser.
+ */
+function isWebUrl(href: string | undefined): boolean {
+  if (!href) return false
+  try {
+    const { protocol } = new URL(href)
+    return protocol === 'http:' || protocol === 'https:'
+  } catch {
+    return false
+  }
 }
 
 /**

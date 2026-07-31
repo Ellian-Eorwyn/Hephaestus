@@ -15,12 +15,19 @@ export function FileLink({
   path,
   line,
   label,
+  unverified,
   variant = 'inline'
 }: {
   path: string
   line?: number
   /** Text to show; defaults to the project-relative path. */
   label?: string
+  /**
+   * The path sits inside the project but matches nothing we have listed. Still
+   * clickable — it may be a file created moments ago — but drawn so it doesn't
+   * promise more than it can deliver.
+   */
+  unverified?: boolean
   /**
    * `inline` sits in a sentence, `code` keeps the monospace look of the backticks
    * it replaced, `chip` is a standalone row (tool blocks).
@@ -31,12 +38,13 @@ export function FileLink({
   const selectedCwd = useStore((s) => s.selectedCwd)
   const text = label ?? relativeTo(selectedCwd, path) + (line ? `:${line}` : '')
   const name = path.split('/').pop() ?? path
+  const target = line ? `${path}:${line}` : path
 
   return (
     <button
       type="button"
-      className={`file-link ${variant}`}
-      title={line ? `${path}:${line}` : path}
+      className={`file-link ${variant}${unverified ? ' unverified' : ''}`}
+      title={unverified ? `${target}\nNot in the project index — it may not exist yet.` : target}
       onClick={(e) => {
         e.stopPropagation()
         e.preventDefault()

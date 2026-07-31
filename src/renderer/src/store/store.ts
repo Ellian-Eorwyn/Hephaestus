@@ -6,6 +6,7 @@ import type {
   SessionUpdatePayload,
   SessionDetail,
   FileNode,
+  FileChangeType,
   FileContent,
   BackendHealth,
   AgentBatch,
@@ -18,8 +19,8 @@ import type {
   ExtensionUIRequest,
   ExtensionUIResponse
 } from '@shared/types'
-import { wrapWithViewingContext } from '@shared/viewing-context'
-import { isInside, resolveProjectPath } from '@shared/paths'
+import { wrapWithContext } from '@shared/viewing-context'
+import { isInside, resolveProjectPath, trimTrailingSlash } from '@shared/paths'
 import { ancestorDirs, collectPaths, loadedDirs, mergeListing, setChildren } from '../lib/filetree'
 
 const heph = window.heph
@@ -231,6 +232,8 @@ let wired = false
 const unsubscribes: Array<() => void> = []
 /** Guards against overlapping full tree re-listings during a burst of changes. */
 let relistInFlight = false
+/** The same, for the background path index — see `patchProjectIndex`. */
+let reindexInFlight = false
 
 function wireSubscriptions(
   get: () => State,
@@ -247,6 +250,37 @@ function wireSubscriptions(
     heph.onProjectChanged((payload) => {
       const st = get()
       if (!samePath(st.selectedCwd, payload.cwd)) return
+
+      // Keep the reference index in step with what just appeared or vanished, so a
+      // path the agent names is clickable in the same reply that creates it. Only
+      // structural events carry index work — a plain content edit, the common case,
+      // costs nothing here.
+      if (payload.overflow) {
+        // Too much moved to enumerate; the only honest answer is another walk. It is
+        // bounded in the main process (20k entries / 1.5s), so this stays cheap.
+        if (!reindexInFlight) {
+          reindexInFlight = true
+          void heph
+            .indexPaths(payload.cwd)
+            .then((index) => {
+              if (!samePath(get().selectedCwd, payload.cwd)) return
+              set({ projectIndex: new Set(index.paths) })
+            })
+            .catch(() => {})
+            .finally(() => {
+              reindexInFlight = false
+            })
+        }
+      } else {
+        const of = (...types: FileChangeType[]): string[] =>
+          payload.changes.filter((c) => types.includes(c.type)).map((c) => c.path)
+        const add = of('add', 'addDir')
+        const remove = of('unlink')
+        const removeTrees = of('unlinkDir')
+        if (add.length || remove.length || removeTrees.length) {
+          patchProjectIndex(payload.cwd, { add, remove, removeTrees }, set, get)
+        }
+      }
 
       // Only a structural change moves the tree. A plain content edit — which is
       // what the agent does most — leaves the listing identical, so re-listing for
@@ -519,6 +553,69 @@ export function selectKnownPaths(s: State): {
   return value
 }
 
+/**
+ * Pending additions/removals for `projectIndex`, flushed on a trailing timer.
+ *
+ * Every commit gives the index a new identity, which is what makes
+ * `selectKnownPaths` recompute — and because `MarkdownBody` subscribes to that
+ * selector directly, the memo on `Message` doesn't stop the whole visible transcript
+ * re-parsing. A branch switch or a multi-file edit arrives as a run of short bursts,
+ * so coalescing them is the difference between one re-parse and fifty.
+ */
+let indexPatch: { add: Set<string>; remove: Set<string>; removeTrees: Set<string> } | null = null
+let indexTimer: ReturnType<typeof setTimeout> | null = null
+const INDEX_PATCH_DEBOUNCE_MS = 250
+
+/**
+ * Fold created/deleted paths into `projectIndex` without re-walking the project.
+ *
+ * The index is otherwise built once, when the project opens — so a file the agent
+ * creates mid-conversation, which is exactly the one worth clicking, was never
+ * recognised in its own reply. `removeTrees` sweeps a deleted directory's subtree:
+ * chokidar names only the directory, and its own per-file `unlink` events stop at
+ * the watch depth.
+ */
+function patchProjectIndex(
+  cwd: string,
+  patch: { add?: string[]; remove?: string[]; removeTrees?: string[] },
+  set: (patch: Partial<State> | ((s: State) => Partial<State>)) => void,
+  get: () => State
+): void {
+  const acc = (indexPatch ??= { add: new Set(), remove: new Set(), removeTrees: new Set() })
+  for (const p of patch.add ?? []) {
+    acc.add.add(p)
+    acc.remove.delete(p)
+  }
+  for (const p of patch.remove ?? []) {
+    acc.remove.add(p)
+    acc.add.delete(p)
+  }
+  for (const p of patch.removeTrees ?? []) acc.removeTrees.add(p)
+
+  if (indexTimer) return
+  indexTimer = setTimeout(() => {
+    indexTimer = null
+    const pending = indexPatch
+    indexPatch = null
+    // The project may have changed while the timer was pending; its own open call
+    // owns the index now.
+    if (!pending || !samePath(get().selectedCwd, cwd)) return
+    set((s) => {
+      // Replaced, never mutated: `projectIndex` is a cache key in `selectKnownPaths`,
+      // so an in-place `add` would leave every rendered message resolving against the
+      // union built before the file existed.
+      const projectIndex = new Set(s.projectIndex)
+      for (const p of pending.add) projectIndex.add(p)
+      for (const p of pending.remove) projectIndex.delete(p)
+      for (const dir of pending.removeTrees) {
+        const prefix = `${trimTrailingSlash(dir)}/`
+        for (const p of projectIndex) if (p === dir || p.startsWith(prefix)) projectIndex.delete(p)
+      }
+      return { projectIndex }
+    })
+  }, INDEX_PATCH_DEBOUNCE_MS)
+}
+
 /** Containing directory of an absolute path (renderer has no `node:path`). */
 function parentDir(p: string): string {
   const idx = p.replace(/\/+$/, '').lastIndexOf('/')
@@ -668,6 +765,7 @@ function loadSettings() {
     showTools: true,
     showToolResults: true,
     autoAttachFile: true,
+    fileLinkGuidance: true,
     reduceMotion: false
   }
 }
@@ -785,6 +883,8 @@ interface State {
   showTools: boolean
   showToolResults: boolean
   autoAttachFile: boolean
+  /** Ask the agent, on every prompt, to write file paths in a form the UI can link. */
+  fileLinkGuidance: boolean
   reduceMotion: boolean
   setSettingsModalOpen: (open: boolean) => void
   setTheme: (theme: 'dark' | 'light') => void
@@ -795,6 +895,7 @@ interface State {
       showTools: boolean
       showToolResults: boolean
       autoAttachFile: boolean
+      fileLinkGuidance: boolean
       reduceMotion: boolean
     }>
   ) => void
@@ -877,6 +978,7 @@ export const useStore = create<State>((set, get) => {
     showTools: settings.showTools ?? true,
     showToolResults: settings.showToolResults ?? true,
     autoAttachFile: settings.autoAttachFile ?? true,
+    fileLinkGuidance: settings.fileLinkGuidance ?? true,
     reduceMotion: settings.reduceMotion ?? false,
 
     projects: [],
@@ -995,6 +1097,7 @@ export const useStore = create<State>((set, get) => {
         showTools: updates.showTools ?? s.showTools,
         showToolResults: updates.showToolResults ?? s.showToolResults,
         autoAttachFile: updates.autoAttachFile ?? s.autoAttachFile,
+        fileLinkGuidance: updates.fileLinkGuidance ?? s.fileLinkGuidance,
         reduceMotion: updates.reduceMotion ?? s.reduceMotion
       }
       localStorage.setItem('heph.settings', JSON.stringify(next))
@@ -1212,6 +1315,16 @@ export const useStore = create<State>((set, get) => {
     if (!cwd) return
     try {
       void heph.watchProject(cwd)
+      // Rebuild the reference index too — the user's escape hatch for anything the
+      // watcher's depth limit and the tool stream both missed. Unawaited, so the
+      // visible re-listing isn't held up by it.
+      void heph
+        .indexPaths(cwd)
+        .then((index) => {
+          if (!samePath(get().selectedCwd, cwd)) return
+          set({ projectIndex: new Set(index.paths) })
+        })
+        .catch(() => {})
       // Re-list the root plus every directory the user has open, so a refresh sees
       // new files at any expanded level without walking the parts nobody opened.
       const listing = await heph.listFiles(cwd)
@@ -1263,12 +1376,16 @@ export const useStore = create<State>((set, get) => {
     const cwd = get().selectedCwd
     if (!harnessId || !cwd) return false
 
-    // If a file is open and auto-attach is on, silently tell the agent which
-    // file the user is looking at so references like "this" resolve. The chat
-    // bubble keeps showing only the typed text (plus an attachment chip).
+    // Silently tell the agent what it can't see: which file the user is looking at
+    // (so "this" resolves), and how to write paths so its answer comes back with
+    // clickable file links. The chat bubble keeps showing only the typed text (plus
+    // an attachment chip).
     const file = get().selectedFile
     const attach = get().attachViewedFile && !!file
-    const sentText = attach ? wrapWithViewingContext(text, file as string) : text
+    const sentText = wrapWithContext(text, {
+      file: attach ? file : null,
+      fileLinks: get().fileLinkGuidance
+    })
 
     const userMsg: ThreadMessage = {
       id: `local-${Date.now()}`,
@@ -1683,7 +1800,8 @@ export const useStore = create<State>((set, get) => {
     // The tool stream names the file the agent is writing *before* the write lands,
     // so the tree can flash immediately; the filesystem watcher independently
     // refreshes the content a moment later.
-    const edited = collectEditedPaths(events, get().runs[runId]?.cwd ?? b.cwd)
+    const runCwd = get().runs[runId]?.cwd ?? b.cwd
+    const edited = collectEditedPaths(events, runCwd)
     if (edited.length) {
       set((s) => {
         const now = Date.now()
@@ -1696,6 +1814,14 @@ export const useStore = create<State>((set, get) => {
         }
         return { agentEdits }
       })
+      // The same paths feed the reference index, and this — not the watcher — is the
+      // path that matters: the watcher only descends three levels, shallower than
+      // most source trees, whereas a tool's `path` argument names the file at any
+      // depth. Guarded on the selection, since the index is per-open-project while a
+      // run can be for any of them.
+      if (samePath(get().selectedCwd, runCwd)) {
+        patchProjectIndex(runCwd, { add: edited }, set, get)
+      }
     }
 
     // Stats are applied whether or not the run still exists: the authoritative

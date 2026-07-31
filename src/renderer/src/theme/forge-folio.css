@@ -1175,6 +1175,15 @@ img.icon {
 .markdown a:hover {
   text-decoration: underline;
 }
+/* A link that goes nowhere — neither a file in this project nor a web address.
+   Drawn as text so it stops inviting a click that can't do anything. */
+.markdown a.inert {
+  color: inherit;
+  cursor: default;
+}
+.markdown a.inert:hover {
+  text-decoration: none;
+}
 .markdown code {
   font-family: var(--font-mono);
   font-size: 0.85em;
@@ -1811,6 +1820,11 @@ img.icon {
 }
 .file-link.code:hover {
   background: color-mix(in srgb, var(--copper) 22%, transparent);
+}
+/* Inside the project but not in the index — clickable, but don't promise it opens. */
+.file-link.unverified {
+  opacity: 0.75;
+  text-decoration-style: dashed;
 }
 /* A standalone row above a tool call's arguments. */
 .file-link.chip {

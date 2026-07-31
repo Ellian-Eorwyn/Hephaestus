@@ -17,6 +17,8 @@ export const IPC = {
   readFile: 'file:read',
   watchProject: 'file:watch',
 
+  openExternal: 'shell:openExternal',
+
   browseFolder: 'dialog:browseFolder',
   addProject: 'session:addProject',
   removeProject: 'session:removeProject',

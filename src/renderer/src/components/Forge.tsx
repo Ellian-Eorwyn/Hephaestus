@@ -681,7 +681,7 @@ function ToolCallBlock({
       <div className="content">
         {ref && (
           <div className="toolpath">
-            <FileLink path={ref.path} line={ref.line} variant="chip" />
+            <FileLink path={ref.path} line={ref.line} unverified={ref.unverified} variant="chip" />
           </div>
         )}
         <div className="toolargs">{formatArgs(call.arguments)}</div>

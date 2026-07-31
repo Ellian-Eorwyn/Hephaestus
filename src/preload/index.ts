@@ -34,6 +34,8 @@ const api: HephApi = {
   readFile: (path) => ipcRenderer.invoke(IPC.readFile, path),
   watchProject: (cwd) => ipcRenderer.invoke(IPC.watchProject, cwd),
 
+  openExternal: (url) => ipcRenderer.invoke(IPC.openExternal, url),
+
   browseFolder: () => ipcRenderer.invoke(IPC.browseFolder),
   addProject: (input) => ipcRenderer.invoke(IPC.addProject, input),
   removeProject: (input) => ipcRenderer.invoke(IPC.removeProject, input),
