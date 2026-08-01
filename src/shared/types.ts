@@ -568,6 +568,14 @@ export interface HephApi {
   /** The user's home directory, so the renderer can expand `~` in file references. */
   readonly homeDir: string
 
+  /** What's running right now, shown in Settings so a bug report can name a build. */
+  readonly versions: {
+    /** This app's version, matching the released artifact it was built from. */
+    app: string
+    electron: string
+    chrome: string
+  }
+
   listHarnesses(): Promise<HarnessConfig[]>
   addHarness(input: { label: string; agentDir: string }): Promise<HarnessConfig[]>
   removeHarness(id: string): Promise<HarnessConfig[]>
@@ -637,4 +645,6 @@ declare global {
   interface Window {
     heph: HephApi
   }
+  /** App version, injected by the preload build from package.json. */
+  const __APP_VERSION__: string
 }

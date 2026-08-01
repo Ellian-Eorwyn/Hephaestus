@@ -204,8 +204,12 @@ export class FileService {
           const full = path.join(dir, e.name)
           // Below the root only — a project that *is* a heavy dir still indexes.
           if (isIgnoredPath(root, full)) continue
-          paths.push(full)
+          // Files only. Directories still drive the walk, but a reference resolving
+          // to one produces a link that cannot open — the preview reads files — and
+          // a backticked `src` or `00 Inbox` is far more often a word than a
+          // reference anyway.
           if (e.isDirectory()) next.push(full)
+          else paths.push(full)
         }
       }
       queue = next

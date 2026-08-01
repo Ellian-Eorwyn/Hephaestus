@@ -79,13 +79,15 @@ export function loadedDirs(nodes: FileNode[], out: string[] = []): string[] {
 }
 
 /**
- * Every path currently in the tree. Used to decide whether a path-shaped string in
- * an agent reply is a real file worth linking — validating against what we actually
- * listed is what keeps the heuristic link forms from underlining random prose.
+ * Every *file* currently in the tree. Used to decide whether a string in an agent
+ * reply is a real file worth linking — validating against what we actually listed is
+ * what keeps the heuristic link forms from underlining random prose.
  */
 export function collectPaths(nodes: FileNode[], out: Set<string> = new Set()): Set<string> {
   for (const n of nodes) {
-    out.add(n.path)
+    // Files only: this feeds file-reference resolution, and a link to a directory
+    // has nothing to show in the preview.
+    if (n.type === 'file') out.add(n.path)
     if (n.children) collectPaths(n.children, out)
   }
   return out

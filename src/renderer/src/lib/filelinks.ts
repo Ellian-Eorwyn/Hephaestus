@@ -104,24 +104,53 @@ export function resolveGuess(raw: string, ctx: LinkContext): FileRef | null {
 }
 
 /**
- * Resolve a backticked reference: everything `resolveGuess` accepts, plus an exact
- * match on a name the path shape rejects.
+ * Resolve a backticked reference.
  *
- * `Makefile`, `Dockerfile` and `.gitignore` carry neither a separator nor an
- * extension, so `PATH_RE` never fires on them — yet agents name them constantly.
- * Widening the regex isn't the answer, because it is also what stops ordinary prose
- * from sprouting underlines. Backticks are where the extra latitude is safe: the
- * string has to equal a filename occurring exactly once in the project, and someone
- * wrote it as code deliberately. Prose keeps the stricter rule, where a lone word is
- * far more likely to be a word.
+ * Backticks bound the reference exactly, so none of the shape rules prose needs
+ * apply here: matching the project's real contents is a far stronger test than any
+ * pattern, and it is the only one that admits the filenames people actually have.
+ * `08 Directory/8.01 People — Contacts/Gillian Eorwyn.md` is an unremarkable note in
+ * an Obsidian vault — spaces, an em dash, a numbered folder — and no path-shaped
+ * regex will ever match it. Neither will `Makefile` or `.gitignore`, which carry no
+ * separator and no extension at all.
+ *
+ * Nothing is lost by dropping the shape test: a backticked `npm run dev` resolves to
+ * a path nobody has, so it stays code. Prose keeps the strict rule, where the
+ * reference has no delimiters and a lone word is far more likely to be a word.
  */
 export function resolveInlineCode(raw: string, ctx: LinkContext): FileRef | null {
-  const hit = resolveGuess(raw, ctx)
-  if (hit) return hit
   const trimmed = raw.trim()
-  if (!trimmed || /\s|\//.test(trimmed)) return null
-  const unique = ctx.byBasename.get(trimmed)
-  return unique ? { path: unique } : null
+  if (!trimmed) return null
+  const { path: bare, line } = splitLineSuffix(trimmed)
+  const abs = resolveProjectPath(ctx.cwd, bare, ctx.home)
+  if (abs && ctx.known.has(abs)) return { path: abs, line }
+  if (!bare.includes('/')) {
+    const unique = ctx.byBasename.get(bare)
+    if (unique) return { path: unique, line }
+  }
+  return null
+}
+
+/**
+ * Resolve an Obsidian `[[wikilink]]` to a note.
+ *
+ * In a vault this is *the* way to name a note, so leaving it inert meant the one
+ * reference form the user's own notes are built from was the one that didn't work. A
+ * target names a note rather than a path — usually without the `.md` — and may carry
+ * a `#heading` this pane has no way to jump to, so the fragment is dropped.
+ */
+export function resolveWikilink(target: string, ctx: LinkContext): FileRef | null {
+  const name = target.split('#')[0].trim()
+  if (!name) return null
+  for (const candidate of name.endsWith('.md') ? [name] : [`${name}.md`, name]) {
+    const abs = resolveProjectPath(ctx.cwd, candidate, ctx.home)
+    if (abs && ctx.known.has(abs)) return { path: abs }
+    if (!candidate.includes('/')) {
+      const unique = ctx.byBasename.get(candidate)
+      if (unique) return { path: unique }
+    }
+  }
+  return null
 }
 
 /** Cheap shape test used before the (more expensive) tree lookup. */

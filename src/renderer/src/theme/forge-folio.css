@@ -1821,6 +1821,17 @@ img.icon {
 .file-link.code:hover {
   background: color-mix(in srgb, var(--copper) 22%, transparent);
 }
+/* Settings > About: build identity and file-link readiness. */
+.settings-about {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.7;
+  padding: 4px 2px;
+}
+.settings-about strong {
+  color: var(--copper-bright);
+}
+
 /* Inside the project but not in the index — clickable, but don't promise it opens. */
 .file-link.unverified {
   opacity: 0.75;

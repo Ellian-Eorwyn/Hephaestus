@@ -2,7 +2,7 @@ import { useMemo } from 'react'
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown'
 import type { PluggableList } from 'unified'
 import remarkGfm from 'remark-gfm'
-import { resolveExplicit, resolveInlineCode } from '../lib/filelinks'
+import { resolveExplicit, resolveInlineCode, resolveWikilink } from '../lib/filelinks'
 import { FILE_SENTINEL, parseFileSentinel, remarkFilePaths } from '../lib/remark-file-paths'
 import { FileLink, useLinkContext } from './FileLink'
 
@@ -45,6 +45,13 @@ export function MarkdownBody({ source }: { source: string }): JSX.Element {
         // react-markdown's mdast node — drop it so it can't reach the DOM.
         a({ href, children, node: _node, ...props }) {
           if (href?.startsWith(WIKILINK)) {
+            // A wikilink naming a note in this vault opens it, like any other file
+            // reference. One that resolves to nothing stays styled as a wikilink —
+            // in Obsidian that's a note you haven't written yet, not a broken link.
+            const note = resolveWikilink(decodeURIComponent(href.slice(WIKILINK.length)), linkCtx)
+            if (note) {
+              return <FileLink path={note.path} label={nodeText(children) ?? undefined} />
+            }
             return <span className="wikilink">{children}</span>
           }
           // A path we spotted in prose, or a link the agent wrote pointing at a

@@ -18,6 +18,15 @@ const api: HephApi = {
   // file references the agent writes, on every rendered message.
   homeDir: os.homedir(),
 
+  // What's actually running, for the Settings footer. `app.getVersion()` lives in
+  // main, so the app version is baked in by the preload build instead; the rest
+  // come straight off this process.
+  versions: {
+    app: __APP_VERSION__,
+    electron: process.versions.electron,
+    chrome: process.versions.chrome
+  },
+
   listHarnesses: () => ipcRenderer.invoke(IPC.listHarnesses),
   addHarness: (input) => ipcRenderer.invoke(IPC.addHarness, input),
   removeHarness: (id) => ipcRenderer.invoke(IPC.removeHarness, id),

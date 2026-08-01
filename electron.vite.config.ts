@@ -1,6 +1,7 @@
 import { resolve } from 'node:path'
 import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
 import react from '@vitejs/plugin-react'
+import pkg from './package.json'
 
 export default defineConfig({
   main: {
@@ -22,6 +23,11 @@ export default defineConfig({
   },
   preload: {
     plugins: [externalizeDepsPlugin()],
+    // Baked in at build time rather than fetched over IPC: the renderer shows this
+    // in Settings, and `app.getVersion()` is main-only. Both come from the same
+    // package.json the installer versions its artifacts from, so what Settings
+    // reports is what was built.
+    define: { __APP_VERSION__: JSON.stringify(pkg.version) },
     build: {
       rollupOptions: {
         input: { index: resolve('src/preload/index.ts') }

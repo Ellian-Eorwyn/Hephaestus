@@ -1,6 +1,6 @@
 import { X } from 'lucide-react'
 import { ICON } from '../lib/icons'
-import { useStore } from '../store/store'
+import { useStore, selectKnownPaths } from '../store/store'
 
 export function SettingsModal(): JSX.Element | null {
   const open = useStore((s) => s.settingsModalOpen)
@@ -95,6 +95,8 @@ export function SettingsModal(): JSX.Element | null {
               />
             </SettingRow>
           </section>
+
+          <About />
         </div>
 
         <div className="modal-actions">
@@ -104,6 +106,40 @@ export function SettingsModal(): JSX.Element | null {
         </div>
       </div>
     </div>
+  )
+}
+
+/**
+ * Which build is running, and whether it can recognise file references.
+ *
+ * The version is here because "is the fix in the copy I'm running?" was otherwise
+ * unanswerable from inside the app. The index count sits beside it because it is the
+ * single thing that decides whether a path the agent names becomes a link: with
+ * nothing indexed there is nothing to check a reference against, and every path
+ * stays plain text however well the resolver works.
+ */
+function About(): JSX.Element {
+  const { app, electron, chrome } = window.heph.versions
+  const selectedCwd = useStore((s) => s.selectedCwd)
+  const { known } = useStore(selectKnownPaths)
+
+  return (
+    <section className="settings-group">
+      <div className="settings-group-title">About</div>
+      <div className="settings-about">
+        <div>
+          Hephaestus <strong>{app}</strong>
+        </div>
+        <div className="muted">Electron {electron} · Chromium {chrome.split('.')[0]}</div>
+        <div className="muted">
+          {!selectedCwd
+            ? 'No project open — file links need one.'
+            : known.size === 0
+              ? 'No files indexed yet for this project — file links stay plain text until it finishes.'
+              : `${known.size.toLocaleString()} files indexed for file links.`}
+        </div>
+      </div>
+    </section>
   )
 }
 

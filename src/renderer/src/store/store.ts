@@ -274,7 +274,8 @@ function wireSubscriptions(
       } else {
         const of = (...types: FileChangeType[]): string[] =>
           payload.changes.filter((c) => types.includes(c.type)).map((c) => c.path)
-        const add = of('add', 'addDir')
+        // `addDir` deliberately absent: the index carries files only.
+        const add = of('add')
         const remove = of('unlink')
         const removeTrees = of('unlinkDir')
         if (add.length || remove.length || removeTrees.length) {
