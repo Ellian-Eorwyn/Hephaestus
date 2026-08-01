@@ -2,6 +2,8 @@
 
 A maintenance release for [0.2.1](https://github.com/Ellian-Eorwyn/Hephaestus/releases/tag/v0.2.1). Clickable file links were the headline feature of 0.2.1 and they largely didn't work — this release makes them work. Everything from 0.2.1 still applies; this only changes what's listed below.
 
+> **Superseded by [0.2.3](https://github.com/Ellian-Eorwyn/Hephaestus/releases/tag/v0.2.3).** The fixes below apply to code projects. In a folder of notes, where filenames contain spaces, file links still did nothing — and this release made that worse, not better. Install 0.2.3 instead.
+
 ## 🔗 Fixed: file links that rendered but opened nothing
 
 The 0.2.1 notes promised that any file the agent mentions becomes a link you can click. In practice two things went wrong, and between them the feature was mostly invisible.
