@@ -25,6 +25,10 @@ export const IPC = {
 
   checkBackend: 'backend:check',
 
+  getStackConfig: 'stack:getConfig',
+  setStackConfig: 'stack:setConfig',
+  probeStack: 'stack:probe',
+
   agentOpen: 'agent:open',
   agentSend: 'agent:send',
   agentRespond: 'agent:respond',
@@ -37,5 +41,6 @@ export const IPC = {
   evtSessionUpdated: 'evt:sessionUpdated',
   evtAgentBatch: 'evt:agentBatch',
   evtProjectChanged: 'evt:projectChanged',
-  evtInstallProgress: 'evt:installProgress'
+  evtInstallProgress: 'evt:installProgress',
+  evtStackStatus: 'evt:stackStatus'
 } as const

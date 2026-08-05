@@ -337,6 +337,91 @@ export interface BackendHealth {
 }
 
 // ---------------------------------------------------------------------------
+// LLM stack monitor
+// ---------------------------------------------------------------------------
+
+/**
+ * One GPU as reported by the stack's state API. Fields are camelCase mappings of
+ * the API's snake_case (`mem_used` -> `memUsedMib`, and so on); MiB and watts are
+ * the units the API uses, kept as-is so nothing is lost to rounding on the way in.
+ */
+export interface StackGpu {
+  index: number
+  /** e.g. "NVIDIA GeForce RTX 3090". */
+  name: string
+  memUsedMib: number
+  memTotalMib: number
+  memPct: number
+  /** Core utilisation, percent. */
+  util: number
+  /** Degrees Celsius. */
+  temp: number
+  powerWatts: number
+  powerLimitWatts: number
+  fanPct: number
+  busy: boolean
+  /** Resident model aliases, e.g. ["chat-dense", "task"]. */
+  models: string[]
+}
+
+/** A condition the stack is reporting about itself. */
+export interface StackAlert {
+  level: 'error' | 'warn' | 'info'
+  code: string
+  subject: string
+  text: string
+}
+
+/**
+ * A poll of the LLM stack's state API.
+ *
+ * Everything past `reachable` is optional because an unreachable stack still
+ * produces a status — the UI shows the failure rather than vanishing, so a stack
+ * that went down looks different from one that was never configured.
+ */
+export interface StackStatus {
+  reachable: boolean
+  baseUrl: string
+  checkedAt: string
+  /** Why the poll failed, when `reachable` is false. */
+  error?: string
+  hostname?: string
+  busy?: boolean
+  servicesActive?: number
+  servicesTotal?: number
+  backendsActive?: number
+  routerEnabled?: boolean
+  gpus: StackGpu[]
+  alerts: StackAlert[]
+}
+
+/**
+ * Monitor configuration, as the renderer sees it.
+ *
+ * The token is deliberately absent: it lives in the main process and is reported
+ * only as `hasToken`, so it never crosses IPC after being set.
+ */
+export interface StackConfig {
+  enabled: boolean
+  baseUrl: string
+  hasToken: boolean
+}
+
+/** What the renderer may change. `token: null` clears a stored token. */
+export interface StackConfigInput {
+  enabled: boolean
+  baseUrl: string
+  token?: string | null
+}
+
+/** Result of the Settings "Test connection" button. */
+export interface StackProbeResult {
+  ok: boolean
+  /** Failure reason, or the rejection message for a malformed/disallowed URL. */
+  error?: string
+}
+
+// ---------------------------------------------------------------------------
 // Agent driver (RPC) events
 // ---------------------------------------------------------------------------
 
@@ -609,6 +694,13 @@ export interface HephApi {
 
   checkBackend(harnessId: string): Promise<BackendHealth>
 
+  // LLM stack monitor
+  getStackConfig(): Promise<StackConfig>
+  /** Persist config and (re)start or stop polling. Returns the config as stored. */
+  setStackConfig(input: StackConfigInput): Promise<StackConfig>
+  /** One-shot reachability check against a URL that hasn't been saved yet. */
+  probeStack(input: { baseUrl: string; token?: string | null }): Promise<StackProbeResult>
+
   // Agent driver
   agentOpen(input: {
     harnessId: string
@@ -639,6 +731,7 @@ export interface HephApi {
   onAgentBatch(cb: (batch: AgentBatch) => void): () => void
   onProjectChanged(cb: (payload: ProjectChangePayload) => void): () => void
   onInstallProgress(cb: (event: InstallEvent) => void): () => void
+  onStackStatus(cb: (status: StackStatus) => void): () => void
 }
 
 declare global {

@@ -6,7 +6,8 @@ import type {
   AgentBatch,
   InstallEvent,
   ProjectChangePayload,
-  SessionUpdatePayload
+  SessionUpdatePayload,
+  StackStatus
 } from '@shared/types'
 
 const api: HephApi = {
@@ -51,6 +52,10 @@ const api: HephApi = {
 
   checkBackend: (harnessId) => ipcRenderer.invoke(IPC.checkBackend, harnessId),
 
+  getStackConfig: () => ipcRenderer.invoke(IPC.getStackConfig),
+  setStackConfig: (input) => ipcRenderer.invoke(IPC.setStackConfig, input),
+  probeStack: (input) => ipcRenderer.invoke(IPC.probeStack, input),
+
   agentOpen: (input) => ipcRenderer.invoke(IPC.agentOpen, input),
   agentSend: (input) => ipcRenderer.invoke(IPC.agentSend, input),
   agentRespond: (input) => ipcRenderer.invoke(IPC.agentRespond, input),
@@ -78,6 +83,11 @@ const api: HephApi = {
     const listener = (_e: unknown, event: InstallEvent) => cb(event)
     ipcRenderer.on(IPC.evtInstallProgress, listener)
     return () => ipcRenderer.removeListener(IPC.evtInstallProgress, listener)
+  },
+  onStackStatus: (cb) => {
+    const listener = (_e: unknown, status: StackStatus) => cb(status)
+    ipcRenderer.on(IPC.evtStackStatus, listener)
+    return () => ipcRenderer.removeListener(IPC.evtStackStatus, listener)
   }
 }
 

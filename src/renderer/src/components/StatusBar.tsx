@@ -1,5 +1,6 @@
 import { useShallow } from 'zustand/react/shallow'
 import { useStore, countActive, selectCurrentRunId } from '../store/store'
+import { StackChip } from './StackChip'
 import type { StatsPatch } from '@shared/types'
 
 function fmt(n: number): string {
@@ -81,6 +82,8 @@ export function StatusBar(): JSX.Element {
         </span>
       )}
       {health?.online && health.models[0] && <span className="muted">{health.models[0]}</span>}
+      {/* The machine behind that backend, when the stack monitor is configured. */}
+      <StackChip />
       {runningCount > 0 && (
         <span className="copper">● {runningCount > 1 ? `${runningCount} RUNNING` : 'RUNNING'}</span>
       )}

@@ -8,10 +8,17 @@ import { FileService } from './file-service'
 import { checkBackend } from './backend-health'
 import { AgentDriver } from './agent-driver'
 import { HarnessInstaller } from './harness-installer'
+import { StackMonitor } from './stack-monitor'
 import { getPreset } from '@shared/harness-presets'
 import { expandHome, normalizeDir } from './harness-registry'
 import { encodeCwd } from './session-parse'
-import type { AgentBatch, ExtensionUIResponse, InstallEvent } from '@shared/types'
+import type {
+  AgentBatch,
+  ExtensionUIResponse,
+  InstallEvent,
+  StackConfigInput,
+  StackStatus
+} from '@shared/types'
 
 const registry = new HarnessRegistry()
 const sessions = new SessionStore()
@@ -58,6 +65,10 @@ const installer = new HarnessInstaller((event: InstallEvent) => {
   send(IPC.evtInstallProgress, event)
 })
 
+const stack = new StackMonitor((status: StackStatus) => {
+  send(IPC.evtStackStatus, status)
+})
+
 function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: 1440,
@@ -83,6 +94,11 @@ function createWindow(): void {
   mainWindow.on('closed', () => {
     mainWindow = null
   })
+
+  // Nobody reads a status bar in a background window, so the stack poll backs off
+  // when this one isn't in front.
+  mainWindow.on('focus', () => stack.setActive(true))
+  mainWindow.on('blur', () => stack.setActive(false))
 
   // A wedged window is the one failure mode with no other trace. Record when it
   // starts and stops so a "the app froze" report has a timestamp to sit against.
@@ -230,6 +246,24 @@ function registerIpc(): void {
     return checkBackend(harnessId, models)
   })
 
+  /**
+   * The renderer asks for this on startup and after a reload. The first poll may
+   * already have fired against a window that wasn't listening yet, and the next
+   * one is up to 30s away, so replay the latest status rather than leave the
+   * chip blank until then.
+   */
+  ipcMain.handle(IPC.getStackConfig, () => {
+    const last = stack.lastStatus()
+    if (last) setImmediate(() => send(IPC.evtStackStatus, last))
+    return stack.publicConfig()
+  })
+  ipcMain.handle(IPC.setStackConfig, async (_e, input: StackConfigInput) => stack.setConfig(input))
+  ipcMain.handle(
+    IPC.probeStack,
+    async (_e, input: { baseUrl: string; token?: string | null }) =>
+      stack.probe(input.baseUrl, input.token)
+  )
+
   ipcMain.handle(IPC.agentOpen, async (_e, input: { harnessId: string; cwd: string; sessionPath?: string }) => {
     const h = registry.get(input.harnessId)
     if (!h) return { ok: false, reason: 'Unknown harness' }
@@ -263,6 +297,8 @@ app.whenReady().then(async () => {
   })
 
   await registry.load()
+  // Best-effort: a broken stack.json must not stop the app from starting.
+  await stack.load().catch((err) => log(`WARN stack monitor config: ${String(err)}`))
   registerIpc()
   createWindow()
   watchHarnesses()
@@ -275,6 +311,7 @@ app.whenReady().then(async () => {
 app.on('window-all-closed', async () => {
   agent.disposeAll()
   files.dispose()
+  stack.dispose()
   await sessions.dispose()
   if (process.platform !== 'darwin') app.quit()
 })
@@ -282,5 +319,6 @@ app.on('window-all-closed', async () => {
 app.on('before-quit', async () => {
   agent.disposeAll()
   files.dispose()
+  stack.dispose()
   await sessions.dispose()
 })

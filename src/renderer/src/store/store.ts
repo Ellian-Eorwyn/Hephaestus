@@ -17,7 +17,10 @@ import type {
   ThreadMessage,
   HarnessPresetStatus,
   ExtensionUIRequest,
-  ExtensionUIResponse
+  ExtensionUIResponse,
+  StackConfig,
+  StackConfigInput,
+  StackStatus
 } from '@shared/types'
 import { wrapWithContext } from '@shared/viewing-context'
 import { isInside, resolveProjectPath, trimTrailingSlash } from '@shared/paths'
@@ -246,6 +249,7 @@ function wireSubscriptions(
     })
   )
   unsubscribes.push(heph.onAgentBatch((b) => get().applyAgentBatch(b)))
+  unsubscribes.push(heph.onStackStatus((stack) => set({ stack })))
   unsubscribes.push(
     heph.onProjectChanged((payload) => {
       const st = get()
@@ -865,6 +869,16 @@ interface State {
   // status
   backend: Record<string, BackendHealth>
 
+  /**
+   * Latest poll of the LLM stack behind the model backend, or null when the
+   * monitor is off (or hasn't answered yet). Owned by the main process — the
+   * renderer only ever reads it.
+   */
+  stack: StackStatus | null
+  /** Null until the main process has been asked; `enabled: false` by default. */
+  stackConfig: StackConfig | null
+  stackPanelOpen: boolean
+
   // one-click installers
   harnessPresets: HarnessPresetStatus[]
   installLogs: Record<string, InstallLog>
@@ -932,6 +946,9 @@ interface State {
   clearRevealTarget: () => void
   setAttachViewedFile: (on: boolean) => void
   refreshBackend: (harnessId: string) => Promise<void>
+  /** Persist monitor settings in main and adopt whatever it stored. */
+  saveStackConfig: (input: StackConfigInput) => Promise<void>
+  setStackPanelOpen: (open: boolean) => void
   addProject: (cwd: string) => Promise<void>
   browseAndAddProject: () => Promise<void>
 
@@ -1019,6 +1036,9 @@ export const useStore = create<State>((set, get) => {
   attachViewedFile: settings.autoAttachFile ?? true,
 
   backend: {},
+  stack: null,
+  stackConfig: null,
+  stackPanelOpen: false,
   harnessPresets: [],
   installLogs: {},
 
@@ -1037,6 +1057,13 @@ export const useStore = create<State>((set, get) => {
 
     // Load installer presets (best-effort; powers the Add Harness modal).
     void get().loadHarnessPresets()
+
+    // Adopt the stack monitor's config. Main replays its last poll in response,
+    // so an enabled monitor fills the status bar without waiting for a tick.
+    void heph
+      .getStackConfig()
+      .then((stackConfig) => set({ stackConfig }))
+      .catch(() => {})
 
     // Reconnect to any in-flight runs now (survives renderer reloads).
     void get().resyncRuns()
@@ -1358,6 +1385,21 @@ export const useStore = create<State>((set, get) => {
       // ignore
     }
   },
+
+  /**
+   * Unlike the other settings this one is stored by the main process, which owns
+   * both the poll and the token — so the config we adopt is whatever main
+   * normalized and saved, not what was typed. Errors (a bad URL) propagate to the
+   * caller so Settings can show them.
+   */
+  saveStackConfig: async (input) => {
+    const stackConfig = await heph.setStackConfig(input)
+    // A disabled monitor stops polling, so the last reading would otherwise sit
+    // in the status bar going stale.
+    set(stackConfig.enabled ? { stackConfig } : { stackConfig, stack: null, stackPanelOpen: false })
+  },
+
+  setStackPanelOpen: (open) => set({ stackPanelOpen: open }),
 
   addProject: async (cwd) => {
     const harnessId = get().activeHarnessId()
