@@ -17,7 +17,8 @@ import type {
   ExtensionUIResponse,
   InstallEvent,
   StackConfigInput,
-  StackStatus
+  StackStatus,
+  ThinkingLevel
 } from '@shared/types'
 
 const registry = new HarnessRegistry()
@@ -283,6 +284,45 @@ function registerIpc(): void {
   ipcMain.handle(IPC.agentAbortRetry, async (_e, runId: string) => agent.abortRetry(runId))
   ipcMain.handle(IPC.agentClose, async (_e, runId: string) => agent.close(runId))
   ipcMain.handle(IPC.agentListRuns, async () => agent.snapshot())
+
+  ipcMain.handle(
+    IPC.agentSetModel,
+    async (_e, input: { runId: string; provider: string; modelId: string }) =>
+      agent.setModel(input.runId, input.provider, input.modelId)
+  )
+  ipcMain.handle(IPC.agentCycleModel, async (_e, input: { runId: string }) =>
+    agent.cycleModel(input.runId)
+  )
+  ipcMain.handle(IPC.agentGetAvailableModels, async (_e, runId: string) =>
+    agent.getAvailableModels(runId)
+  )
+  ipcMain.handle(
+    IPC.agentSetThinkingLevel,
+    async (_e, input: { runId: string; level: ThinkingLevel }) =>
+      agent.setThinkingLevel(input.runId, input.level)
+  )
+  ipcMain.handle(IPC.agentCycleThinkingLevel, async (_e, input: { runId: string }) =>
+    agent.cycleThinkingLevel(input.runId)
+  )
+  ipcMain.handle(IPC.agentGetState, async (_e, runId: string) => agent.getState(runId))
+  ipcMain.handle(IPC.agentGetCommands, async (_e, runId: string) => agent.getCommands(runId))
+  ipcMain.handle(
+    IPC.agentCompact,
+    async (_e, input: { runId: string; customInstructions?: string }) =>
+      agent.compact(input.runId, input.customInstructions)
+  )
+  ipcMain.handle(
+    IPC.agentSetSessionName,
+    async (_e, input: { runId: string; name: string }) =>
+      agent.setSessionName(input.runId, input.name)
+  )
+  ipcMain.handle(IPC.agentClone, async (_e, input: { runId: string }) => agent.clone(input.runId))
+  ipcMain.handle(IPC.agentGetForkMessages, async (_e, runId: string) =>
+    agent.getForkMessages(runId)
+  )
+  ipcMain.handle(IPC.agentFork, async (_e, input: { runId: string; entryId: string }) =>
+    agent.fork(input.runId, input.entryId)
+  )
 }
 
 app.whenReady().then(async () => {

@@ -18,13 +18,17 @@ import type {
   HarnessPresetStatus,
   ExtensionUIRequest,
   ExtensionUIResponse,
+  ModelInfo,
+  ModelsConfig,
   StackConfig,
   StackConfigInput,
-  StackStatus
+  StackStatus,
+  ThinkingLevel
 } from '@shared/types'
 import { wrapWithContext } from '@shared/viewing-context'
 import { isInside, resolveProjectPath, trimTrailingSlash } from '@shared/paths'
 import { ancestorDirs, collectPaths, loadedDirs, mergeListing, setChildren } from '../lib/filetree'
+import { DEFAULT_THINKING_LEVEL, nextThinkingLevel } from '../lib/thinking'
 
 const heph = window.heph
 
@@ -54,6 +58,10 @@ export interface RunMeta {
   queued?: { steering: string[]; followUp: string[] }
   /** A non-streaming activity the turn is occupied by (otherwise it looks like a hang). */
   phase?: 'compacting' | 'retrying' | null
+  /** Authoritative thinking level for this run (from state_sync / thinking_level_changed). */
+  thinkingLevel?: ThinkingLevel
+  /** Authoritative active model for this run (from state_sync / a set_model response). */
+  model?: ModelInfo
   /** In-flight automatic retry after a provider failure. */
   retry?: {
     attempt: number
@@ -63,6 +71,17 @@ export interface RunMeta {
     errorMessage: string
   }
 }
+
+/**
+ * Which command popover is open above the composer, if any. `slash` is the
+ * type-ahead autocomplete; the rest are click/command-opened pickers.
+ */
+export type CommandMenuState =
+  | { kind: 'slash'; query: string }
+  | { kind: 'model' }
+  | { kind: 'think' }
+  | { kind: 'session' }
+  | { kind: 'fork' }
 
 /**
  * Accumulated stream buffers for one run. `rev` counts applied batches so an
@@ -92,6 +111,8 @@ function shallowEqualMeta(a: RunMeta, b: RunMeta): boolean {
     a.uiStatus === b.uiStatus &&
     a.queued === b.queued &&
     a.phase === b.phase &&
+    a.thinkingLevel === b.thinkingLevel &&
+    a.model === b.model &&
     a.retry === b.retry
   )
 }
@@ -195,6 +216,19 @@ export function selectCurrentRunId(s: RunTargetState): string | null {
 export function selectCurrentRun(s: RunTargetState): RunMeta | null {
   const id = selectCurrentRunId(s)
   return id ? (s.runs[id] ?? null) : null
+}
+
+/**
+ * The thinking level to display: the current run's authoritative value when a run
+ * is live, otherwise the pinned desired level (which also drives the next chat).
+ */
+export function selectThinkingLevel(s: State): ThinkingLevel {
+  return selectCurrentRun(s)?.thinkingLevel ?? s.thinkingLevel
+}
+
+/** The model to display: the current run's authoritative model, else the pinned desired. */
+export function selectActiveModel(s: State): ModelInfo | null {
+  return selectCurrentRun(s)?.model ?? s.activeModel
 }
 
 /** Number of runs currently doing something — a primitive for the status bar. */
@@ -738,6 +772,13 @@ function applyEventToRun(r: RunMeta, e: AgentStreamEvent): void {
       r.uiStatus = next
       break
     }
+    case 'thinking_level_changed':
+      r.thinkingLevel = e.level
+      break
+    case 'state_sync':
+      if (e.thinkingLevel) r.thinkingLevel = e.thinkingLevel
+      if (e.model) r.model = e.model
+      break
     default:
       break
   }
@@ -773,6 +814,79 @@ function loadSettings() {
     fileLinkGuidance: true,
     reduceMotion: false
   }
+}
+
+/**
+ * Persisted model / thinking preferences. `had*` records whether the user has
+ * ever explicitly chosen one, which is what tells `applyDesiredToRun` to push it
+ * onto a new chat — a fresh user with no persisted choice must not override the
+ * harness's own default level/model.
+ */
+function loadModelPrefs(): {
+  thinkingLevel: ThinkingLevel
+  activeModel: ModelInfo | null
+  hadThinking: boolean
+  hadModel: boolean
+} {
+  try {
+    const raw = localStorage.getItem('heph.modelPrefs')
+    if (raw) {
+      const p = JSON.parse(raw) as { thinkingLevel?: ThinkingLevel; activeModel?: ModelInfo | null }
+      return {
+        thinkingLevel: p.thinkingLevel ?? DEFAULT_THINKING_LEVEL,
+        activeModel: p.activeModel ?? null,
+        hadThinking: p.thinkingLevel != null,
+        hadModel: p.activeModel != null
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return { thinkingLevel: DEFAULT_THINKING_LEVEL, activeModel: null, hadThinking: false, hadModel: false }
+}
+
+/** Persist the pinned level/model (only ever called on an explicit user change). */
+function persistModelPrefs(s: State): void {
+  try {
+    localStorage.setItem(
+      'heph.modelPrefs',
+      JSON.stringify({ thinkingLevel: s.thinkingLevel, activeModel: s.activeModel })
+    )
+  } catch {
+    // ignore
+  }
+}
+
+/** Flatten a harness `models.json` into the flat `ModelInfo[]` the picker renders. */
+function flattenModels(cfg: ModelsConfig | null): ModelInfo[] {
+  if (!cfg) return []
+  const out: ModelInfo[] = []
+  for (const [provider, p] of Object.entries(cfg.providers)) {
+    for (const m of p.models) {
+      out.push({
+        provider,
+        modelId: m.id,
+        label: m.name || m.id,
+        reasoning: m.reasoning,
+        contextWindow: m.contextWindow
+      })
+    }
+  }
+  return out
+}
+
+/** Runs whose pending desired level/model have already been pushed, so a warm reuse isn't re-seeded. */
+const seededRuns = new Set<string>()
+
+/** Append a transient notice (used by the model/thinking actions to surface RPC failures). */
+function pushNotice(
+  set: (patch: Partial<State> | ((s: State) => Partial<State>)) => void,
+  message: string,
+  kind: Notice['kind'] = 'error'
+): void {
+  set((s) => ({
+    notices: [...s.notices, { id: `err-${Date.now()}-${s.notices.length}`, message, kind }]
+  }))
 }
 
 interface State {
@@ -977,11 +1091,40 @@ interface State {
   applyAgentBatch: (b: AgentBatch) => void
   finalizeRun: (runId: string, attempt?: number) => Promise<void>
   resyncRuns: () => Promise<void>
+
+  // --- model + thinking-level control ---
+  /** Pinned desired thinking level: shown when no run is live, and applied to new chats. */
+  thinkingLevel: ThinkingLevel
+  /** Pinned desired model, likewise. Null until the user picks one. */
+  activeModel: ModelInfo | null
+  /** Models offered for the picker, refreshed by `loadAvailableModels`. */
+  availableModels: ModelInfo[]
+  /** The command popover open above the composer, if any. */
+  commandMenu: CommandMenuState | null
+  /** A desired level/model the user set with no live run, to apply on the next fresh run. */
+  pendingThinkingApply: boolean
+  pendingModelApply: boolean
+  /** Cycle the thinking level (Shift+Tab): live via RPC when a run exists, else locally. */
+  cycleThinkingLevel: () => Promise<void>
+  setThinkingLevel: (level: ThinkingLevel) => Promise<void>
+  setModel: (provider: string, modelId: string, label?: string) => Promise<void>
+  /** Load the switchable-model list (live from the run, else from models.json). */
+  loadAvailableModels: () => Promise<void>
+  /** Push any pending desired level/model onto a freshly opened run (once per run). */
+  applyDesiredToRun: (runId: string) => Promise<void>
+  openCommandMenu: (menu: CommandMenuState) => void
+  closeCommandMenu: () => void
+  // Session slash commands (each maps to an RPC command on the current run).
+  compactSession: (instructions?: string) => Promise<void>
+  cloneSession: () => Promise<void>
+  renameSession: (name: string) => Promise<void>
+  forkSession: (entryId: string) => Promise<void>
 }
 
 export const useStore = create<State>((set, get) => {
   const settings = loadSettings()
-  
+  const modelPrefs = loadModelPrefs()
+
   return {
     harnesses: [],
     view: 'dashboard',
@@ -1041,6 +1184,13 @@ export const useStore = create<State>((set, get) => {
   stackPanelOpen: false,
   harnessPresets: [],
   installLogs: {},
+
+  thinkingLevel: modelPrefs.thinkingLevel,
+  activeModel: modelPrefs.activeModel,
+  availableModels: [],
+  commandMenu: null,
+  pendingThinkingApply: modelPrefs.hadThinking,
+  pendingModelApply: modelPrefs.hadModel,
 
   init: async () => {
     document.documentElement.setAttribute('data-theme', get().theme)
@@ -1520,6 +1670,10 @@ export const useStore = create<State>((set, get) => {
       streams[runId] = { text: '', thinking: '', rev: 0 }
       return { runs, streams }
     })
+    // New chat (no session path yet): apply any pending desired model / thinking
+    // level before the first prompt so this turn uses them. Resumed sessions keep
+    // their own state, which arrives via state_sync.
+    if (!sessionPath) await get().applyDesiredToRun(runId)
     const res = await heph.agentSend({ runId, text: sentText })
     if (!res.ok) {
       set((s) => ({
@@ -1548,6 +1702,178 @@ export const useStore = create<State>((set, get) => {
     } catch {
       // ignore — a dead run surfaces via its error/exit events
     }
+  },
+
+  cycleThinkingLevel: async () => {
+    const runId = selectCurrentRunId(get())
+    const run = runId ? get().runs[runId] : undefined
+    const cur = run?.thinkingLevel ?? get().thinkingLevel
+    const next = nextThinkingLevel(cur, run?.model?.thinkingLevels)
+    // Optimistic + pin (the latest explicit choice becomes the new-chat default).
+    set((s) => ({
+      thinkingLevel: next,
+      runs:
+        runId && s.runs[runId]
+          ? { ...s.runs, [runId]: { ...s.runs[runId], thinkingLevel: next } }
+          : s.runs,
+      ...(runId ? {} : { pendingThinkingApply: true })
+    }))
+    persistModelPrefs(get())
+    if (!runId) return
+    const res = await heph.agentCycleThinkingLevel({ runId })
+    if (res.ok && res.level) {
+      const level = res.level
+      set((s) => ({
+        thinkingLevel: level,
+        runs: s.runs[runId]
+          ? { ...s.runs, [runId]: { ...s.runs[runId], thinkingLevel: level } }
+          : s.runs
+      }))
+      persistModelPrefs(get())
+    } else if (!res.ok && res.reason) {
+      pushNotice(set, res.reason)
+    }
+  },
+
+  setThinkingLevel: async (level) => {
+    const runId = selectCurrentRunId(get())
+    set((s) => ({
+      thinkingLevel: level,
+      runs:
+        runId && s.runs[runId]
+          ? { ...s.runs, [runId]: { ...s.runs[runId], thinkingLevel: level } }
+          : s.runs,
+      ...(runId ? {} : { pendingThinkingApply: true })
+    }))
+    persistModelPrefs(get())
+    if (!runId) return
+    const res = await heph.agentSetThinkingLevel({ runId, level })
+    if (!res.ok && res.reason) pushNotice(set, res.reason)
+  },
+
+  setModel: async (provider, modelId, label) => {
+    const runId = selectCurrentRunId(get())
+    const prevGlobal = get().activeModel
+    const prevRun = runId ? get().runs[runId]?.model : undefined
+    const model: ModelInfo = { provider, modelId, label: label ?? modelId }
+    set((s) => ({
+      activeModel: model,
+      runs:
+        runId && s.runs[runId] ? { ...s.runs, [runId]: { ...s.runs[runId], model } } : s.runs,
+      ...(runId ? {} : { pendingModelApply: true }),
+      commandMenu: null
+    }))
+    persistModelPrefs(get())
+    if (!runId) return
+    const res = await heph.agentSetModel({ runId, provider, modelId })
+    if (res.ok && res.model) {
+      const m = res.model
+      set((s) => ({
+        activeModel: m,
+        runs: s.runs[runId] ? { ...s.runs, [runId]: { ...s.runs[runId], model: m } } : s.runs
+      }))
+      persistModelPrefs(get())
+    } else {
+      // Revert the optimistic pin and surface why.
+      set((s) => ({
+        activeModel: prevGlobal,
+        runs:
+          runId && s.runs[runId]
+            ? { ...s.runs, [runId]: { ...s.runs[runId], model: prevRun } }
+            : s.runs
+      }))
+      persistModelPrefs(get())
+      pushNotice(set, res.reason ?? 'Could not switch model.')
+    }
+  },
+
+  loadAvailableModels: async () => {
+    const runId = selectCurrentRunId(get())
+    let models: ModelInfo[] = []
+    if (runId) {
+      try {
+        models = await heph.agentGetAvailableModels(runId)
+      } catch {
+        // fall through to models.json
+      }
+    }
+    if (!models.length) {
+      const harnessId = get().activeHarnessId()
+      if (harnessId) {
+        try {
+          models = flattenModels(await heph.getModels(harnessId))
+        } catch {
+          // leave empty
+        }
+      }
+    }
+    set({ availableModels: models })
+  },
+
+  applyDesiredToRun: async (runId) => {
+    if (seededRuns.has(runId)) return
+    seededRuns.add(runId)
+    const { thinkingLevel, activeModel, pendingThinkingApply, pendingModelApply } = get()
+    const jobs: Promise<unknown>[] = []
+    if (pendingThinkingApply) jobs.push(heph.agentSetThinkingLevel({ runId, level: thinkingLevel }))
+    if (pendingModelApply && activeModel) {
+      jobs.push(
+        heph.agentSetModel({ runId, provider: activeModel.provider, modelId: activeModel.modelId })
+      )
+    }
+    if (!jobs.length) return
+    // Clear the flags and reflect the pinned values on the run before the RPCs
+    // resolve, so the status-bar chips are right from the first frame.
+    set((s) => ({
+      pendingThinkingApply: false,
+      pendingModelApply: false,
+      runs: s.runs[runId]
+        ? {
+            ...s.runs,
+            [runId]: {
+              ...s.runs[runId],
+              thinkingLevel: pendingThinkingApply ? thinkingLevel : s.runs[runId].thinkingLevel,
+              model: pendingModelApply && activeModel ? activeModel : s.runs[runId].model
+            }
+          }
+        : s.runs
+    }))
+    await Promise.allSettled(jobs)
+  },
+
+  openCommandMenu: (menu) => {
+    set({ commandMenu: menu })
+    if (menu.kind === 'model') void get().loadAvailableModels()
+  },
+
+  closeCommandMenu: () => set({ commandMenu: null }),
+
+  compactSession: async (instructions) => {
+    const runId = selectCurrentRunId(get())
+    if (!runId) return pushNotice(set, 'No active session to compact.')
+    const res = await heph.agentCompact({ runId, customInstructions: instructions })
+    if (!res.ok && res.reason) pushNotice(set, res.reason)
+  },
+
+  cloneSession: async () => {
+    const runId = selectCurrentRunId(get())
+    if (!runId) return pushNotice(set, 'No active session to clone.')
+    const res = await heph.agentClone({ runId })
+    if (!res.ok && res.reason) pushNotice(set, res.reason)
+  },
+
+  renameSession: async (name) => {
+    const runId = selectCurrentRunId(get())
+    if (!runId) return pushNotice(set, 'No active session to rename.')
+    const res = await heph.agentSetSessionName({ runId, name })
+    if (!res.ok && res.reason) pushNotice(set, res.reason)
+  },
+
+  forkSession: async (entryId) => {
+    const runId = selectCurrentRunId(get())
+    if (!runId) return pushNotice(set, 'No active session to fork.')
+    const res = await heph.agentFork({ runId, entryId })
+    if (!res.ok && res.reason) pushNotice(set, res.reason)
   },
 
   dismissNotice: (id) => set((s) => ({ notices: s.notices.filter((n) => n.id !== id) })),
@@ -2177,6 +2503,33 @@ export const useStore = create<State>((set, get) => {
         }
         return { runs, streams, pendingPrompts }
       })
+      // A reloaded renderer lost each run's model / thinking level (they aren't in
+      // the snapshot). Re-fetch authoritative state for the viewed run so the
+      // status-bar chips are right without waiting for the next change to fire a
+      // state_sync.
+      const cur = selectCurrentRunId(get())
+      if (cur) {
+        void heph
+          .agentGetState(cur)
+          .then((st) => {
+            if (!st) return
+            set((s) =>
+              s.runs[cur]
+                ? {
+                    runs: {
+                      ...s.runs,
+                      [cur]: {
+                        ...s.runs[cur],
+                        thinkingLevel: st.thinkingLevel ?? s.runs[cur].thinkingLevel,
+                        model: st.model ?? s.runs[cur].model
+                      }
+                    }
+                  }
+                : {}
+            )
+          })
+          .catch(() => {})
+      }
     } catch {
       // ignore — best effort
     } finally {

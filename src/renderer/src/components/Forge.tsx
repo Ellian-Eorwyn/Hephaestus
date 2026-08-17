@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import {
   Send,
@@ -27,7 +27,10 @@ import { FileLink, useLinkContext } from './FileLink'
 import { MarkdownView } from './MarkdownView'
 import { StreamMarkdown } from './StreamMarkdown'
 import { ForgeAnvil } from './ForgeAnvil'
-import type { RunStatus, ThreadMessage } from '@shared/types'
+import { Menu, useRovingMenu, type MenuItem } from './Menu'
+import { CommandMenu } from './CommandMenu'
+import { parseSlashCommand, matchSlashCommands, SLASH_COMMANDS } from '../lib/slash-commands'
+import type { HarnessCommand, RunStatus, ThreadMessage } from '@shared/types'
 
 /** Which optional panes to render on a message. Passed down so each row doesn't subscribe. */
 export interface DisplayToggles {
@@ -188,6 +191,7 @@ export function Forge(): JSX.Element {
                 waiting={prompts.length > 0}
                 phase={run.phase}
                 uiStatus={run.uiStatus?.status}
+                widget={run.uiStatus?.widget}
                 showThinking={show.thinking}
                 onAdvance={stickToBottom}
               />
@@ -227,6 +231,7 @@ const LiveRow = memo(function LiveRow({
   waiting,
   phase,
   uiStatus,
+  widget,
   showThinking,
   onAdvance
 }: {
@@ -237,6 +242,7 @@ const LiveRow = memo(function LiveRow({
   waiting: boolean
   phase?: 'compacting' | 'retrying' | null
   uiStatus?: string
+  widget?: string[]
   showThinking: boolean
   onAdvance: () => void
 }): JSX.Element | null {
@@ -260,6 +266,7 @@ const LiveRow = memo(function LiveRow({
         waiting={waiting}
         phase={phase}
         uiStatus={uiStatus}
+        widget={widget}
       />
     )
   }
@@ -279,7 +286,8 @@ function WorkingRow({
   thinking,
   waiting,
   phase,
-  uiStatus
+  uiStatus,
+  widget
 }: {
   status: string
   startedAt: number
@@ -289,6 +297,7 @@ function WorkingRow({
   waiting?: boolean
   phase?: 'compacting' | 'retrying' | null
   uiStatus?: string
+  widget?: string[]
 }): JSX.Element {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
@@ -324,6 +333,14 @@ function WorkingRow({
         </div>
         {/* Status an extension pushed via ctx.ui.setStatus — previously dropped. */}
         {uiStatus && <div className="working-substatus">{uiStatus}</div>}
+        {/* A multi-line widget an extension pushed via ctx.ui.setWidget. */}
+        {widget && widget.length > 0 && (
+          <div className="working-widget">
+            {widget.map((line, i) => (
+              <div key={i}>{line || ' '}</div>
+            ))}
+          </div>
+        )}
         {thinking && !text && (
           <details className="thinking" open>
             <summary>✦ thinking</summary>
@@ -412,21 +429,31 @@ function InteractivePrompt({ prompt }: { prompt: PendingPrompt }): JSX.Element {
           <div className="prompt-title">{req.title}</div>
 
           {req.method === 'select' && (
-            <div className="prompt-options">
-              {req.options.map((opt) => (
-                <button
-                  key={opt}
-                  className="btn"
-                  onClick={() => void answer(prompt.id, { value: opt })}
-                >
-                  {opt}
-                </button>
-              ))}
-            </div>
+            <Menu
+              variant="inline"
+              autoFocus
+              ariaLabel={req.title}
+              items={req.options.map((opt, i) => ({ id: `${i}:${opt}`, label: opt }))}
+              onChoose={(it) => void answer(prompt.id, { value: it.label })}
+              onCancel={cancel}
+            />
           )}
 
-          {req.method === 'confirm' && req.message && (
-            <div className="prompt-message">{req.message}</div>
+          {req.method === 'confirm' && (
+            <>
+              {req.message && <div className="prompt-message">{req.message}</div>}
+              <Menu
+                variant="inline"
+                autoFocus
+                ariaLabel={req.title}
+                items={[
+                  { id: 'confirm', label: 'Confirm' },
+                  { id: 'decline', label: 'Decline' }
+                ]}
+                onChoose={(it) => void answer(prompt.id, { confirmed: it.id === 'confirm' })}
+                onCancel={cancel}
+              />
+            </>
           )}
 
           {req.method === 'input' && (
@@ -440,6 +467,9 @@ function InteractivePrompt({ prompt }: { prompt: PendingPrompt }): JSX.Element {
                   if (e.key === 'Enter') {
                     e.preventDefault()
                     void answer(prompt.id, { value: draft })
+                  } else if (e.key === 'Escape') {
+                    e.preventDefault()
+                    cancel()
                   }
                 }}
               />
@@ -454,43 +484,39 @@ function InteractivePrompt({ prompt }: { prompt: PendingPrompt }): JSX.Element {
               rows={3}
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                // ⌘/Ctrl+Enter submits (plain Enter inserts a newline); Esc cancels.
+                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                  e.preventDefault()
+                  void answer(prompt.id, { value: draft })
+                } else if (e.key === 'Escape') {
+                  e.preventDefault()
+                  cancel()
+                }
+              }}
             />
           )}
 
-          <div className="prompt-actions">
-            {req.method === 'confirm' ? (
-              <>
-                <button
-                  className="btn primary"
-                  onClick={() => void answer(prompt.id, { confirmed: true })}
-                >
-                  Confirm
-                </button>
-                <button
-                  className="btn"
-                  onClick={() => void answer(prompt.id, { confirmed: false })}
-                >
-                  Decline
-                </button>
-              </>
-            ) : req.method === 'input' || req.method === 'editor' ? (
-              <>
-                <button
-                  className="btn primary"
-                  onClick={() => void answer(prompt.id, { value: draft })}
-                >
-                  Submit
-                </button>
-                <button className="btn ghost" onClick={cancel}>
-                  Cancel
-                </button>
-              </>
-            ) : (
+          {req.method === 'input' || req.method === 'editor' ? (
+            <div className="prompt-actions">
+              <button
+                className="btn primary"
+                onClick={() => void answer(prompt.id, { value: draft })}
+              >
+                Submit
+              </button>
               <button className="btn ghost" onClick={cancel}>
                 Cancel
               </button>
-            )}
-          </div>
+            </div>
+          ) : (
+            <div className="prompt-foot">
+              <span className="prompt-hint">↑↓ choose · ↵ select · esc cancel</span>
+              <button className="btn ghost" onClick={cancel}>
+                Cancel
+              </button>
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -716,6 +742,7 @@ function Composer(): JSX.Element {
   const [text, setText] = useState('')
   const sendPrompt = useStore((s) => s.sendPrompt)
   const abort = useStore((s) => s.abort)
+  const cycleThinkingLevel = useStore((s) => s.cycleThinkingLevel)
   // A boolean, not the run object: typing in here must not re-render per frame of
   // streamed output, and this only flips at the edges of a turn.
   const running = useStore((s) => {
@@ -746,6 +773,89 @@ function Composer(): JSX.Element {
   const canSend = !!harness?.cli && !!selectedCwd
   const showAttach = canSend && !!selectedFile
 
+  // --- slash commands / autocomplete ------------------------------------------
+  const commandMenuKind = useStore((s) => s.commandMenu?.kind)
+  const slashQuery = useStore((s) => (s.commandMenu?.kind === 'slash' ? s.commandMenu.query : ''))
+  const slashOpen = commandMenuKind === 'slash'
+  const [harnessCmds, setHarnessCmds] = useState<HarnessCommand[]>([])
+
+  // Discover the harness's own commands (extension / skill / prompt) once per open,
+  // so autocomplete lists them alongside the built-in client commands.
+  useEffect(() => {
+    if (!slashOpen) return
+    const rid = selectCurrentRunId(useStore.getState())
+    if (!rid) {
+      setHarnessCmds([])
+      return
+    }
+    let alive = true
+    void window.heph
+      .agentGetCommands(rid)
+      .then((cmds) => {
+        if (alive) setHarnessCmds(cmds)
+      })
+      .catch(() => {})
+    return () => {
+      alive = false
+    }
+  }, [slashOpen])
+
+  const slashItems: MenuItem[] = useMemo(() => {
+    if (!slashOpen) return []
+    const q = slashQuery.toLowerCase()
+    const client = matchSlashCommands(q).map((c) => ({
+      id: `c:${c.name}`,
+      label: `/${c.name}`,
+      hint: c.argHint,
+      description: c.description
+    }))
+    const harnessItems = harnessCmds
+      .filter((c) => c.name.toLowerCase().startsWith(q))
+      .map((c) => ({
+        id: `h:${c.name}`,
+        label: `/${c.name}`,
+        hint: c.source,
+        description: c.description
+      }))
+    return [...client, ...harnessItems]
+  }, [slashOpen, slashQuery, harnessCmds])
+
+  const runClientCommand = useCallback(
+    (name: string, args: string) => {
+      const st = useStore.getState()
+      const cmd = SLASH_COMMANDS.find((c) => c.name === name)
+      st.closeCommandMenu()
+      void cmd?.run({ args, runId: selectCurrentRunId(st), canSend, store: st })
+    },
+    [canSend]
+  )
+
+  const chooseSlash = useCallback(
+    (index: number) => {
+      const it = slashItems[index]
+      if (!it) return
+      const name = it.id.slice(2)
+      const isClient = it.id.startsWith('c:')
+      const cmd = isClient ? SLASH_COMMANDS.find((c) => c.name === name) : undefined
+      // A required-arg client command (or any harness command, which is sent as a
+      // prompt) is filled into the composer so the rest can be typed; the others run.
+      if (!isClient || cmd?.argHint?.startsWith('<')) {
+        useStore.getState().closeCommandMenu()
+        setText(`/${name} `)
+        taRef.current?.focus()
+        return
+      }
+      setText('')
+      runClientCommand(name, '')
+    },
+    [slashItems, runClientCommand]
+  )
+
+  const slashRoving = useRovingMenu(slashItems.length, {
+    onChoose: chooseSlash,
+    onCancel: () => useStore.getState().closeCommandMenu()
+  })
+
   // Grow the textarea to fit its content (up to a cap, then scroll) so typed
   // lines are never clipped at the top of the box.
   useEffect(() => {
@@ -765,7 +875,15 @@ function Composer(): JSX.Element {
 
   const submit = (behavior?: 'steer' | 'followUp') => {
     const t = text.trim()
-    if (!t || !canSend) return
+    if (!t) return
+    // A recognized client command runs instead of becoming a chat message.
+    const parsed = parseSlashCommand(t)
+    if (parsed?.cmd) {
+      setText('')
+      runClientCommand(parsed.cmd.name, parsed.args)
+      return
+    }
+    if (!canSend) return
     setText('')
     void sendPrompt(t, behavior)
   }
@@ -778,6 +896,17 @@ function Composer(): JSX.Element {
 
   return (
     <div className="composer">
+      <CommandMenu />
+      {slashOpen && slashItems.length > 0 && (
+        <Menu
+          variant="popover"
+          ariaLabel="Commands"
+          items={slashItems}
+          activeIndex={slashRoving.activeIndex}
+          onActiveIndexChange={slashRoving.setActiveIndex}
+          onChoose={(_item, i) => chooseSlash(i)}
+        />
+      )}
       {showAttach && (
         <div className={`attach-bar ${attachViewedFile ? 'on' : 'off'}`}>
           <Paperclip size={ICON.xs} />
@@ -819,8 +948,28 @@ function Composer(): JSX.Element {
           value={text}
           // Enabled during a turn: the message queues instead of being lost.
           disabled={!canSend}
-          onChange={(e) => setText(e.target.value)}
+          onChange={(e) => {
+            const v = e.target.value
+            setText(v)
+            // Open the autocomplete while typing the bare command (leading "/" and
+            // no whitespace yet); close it once args or a newline begin.
+            const st = useStore.getState()
+            if (v.startsWith('/') && !/\s/.test(v)) {
+              st.openCommandMenu({ kind: 'slash', query: v.slice(1) })
+            } else if (st.commandMenu?.kind === 'slash') {
+              st.closeCommandMenu()
+            }
+          }}
           onKeyDown={(e) => {
+            // The slash-autocomplete popover claims navigation keys first.
+            if (slashOpen && slashItems.length > 0 && slashRoving.onKeyDown(e)) return
+            // Shift+Tab cycles the thinking level (matches the pi/Claude-Code
+            // terminal). preventDefault stops focus from leaving the textarea.
+            if (e.key === 'Tab' && e.shiftKey) {
+              e.preventDefault()
+              void cycleThinkingLevel()
+              return
+            }
             if (e.key === 'Enter' && !e.shiftKey) {
               e.preventDefault()
               // While streaming, ⌘/Ctrl+Enter steers the current turn; plain Enter

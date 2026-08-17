@@ -799,6 +799,7 @@ img.icon {
 /* Composer */
 .composer {
   flex-shrink: 0;
+  position: relative; /* anchors the slash / picker popover */
   border-top: 1px solid var(--border);
   padding: 12px 16px;
   background: var(--bg-1);
@@ -2119,12 +2120,140 @@ img.icon {
   display: flex;
   gap: 8px;
 }
+.prompt-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.prompt-hint {
+  color: var(--text-faint);
+  font-size: 11px;
+  font-family: var(--font-mono);
+}
+/* A multi-line status widget an extension pushed via ctx.ui.setWidget. */
+.working-widget {
+  margin: 6px 0;
+  padding: 6px 10px;
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-1);
+  white-space: pre-wrap;
+}
 .btn.ghost {
   border-color: transparent;
   color: var(--text-2);
 }
 .btn.ghost:hover {
   border-color: var(--border-strong);
+  color: var(--text-1);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Shared keyboard-navigable menu — extension dialogs, model / thinking       */
+/* pickers, and slash autocomplete. `inline` sits in a thread card; `popover` */
+/* floats above the composer.                                                 */
+/* ------------------------------------------------------------------------- */
+.menu {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-family: var(--font-mono);
+}
+.menu:focus {
+  outline: none;
+}
+.menu.inline {
+  margin-bottom: 12px;
+}
+.menu.popover {
+  position: absolute;
+  left: 16px;
+  right: 16px;
+  bottom: calc(100% + 6px);
+  max-height: 320px;
+  overflow-y: auto;
+  z-index: 40;
+  padding: 4px;
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: 0 10px 30px var(--shadow);
+}
+.menu-item {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 6px 10px;
+  border-radius: 5px;
+  cursor: pointer;
+  user-select: none;
+  color: var(--text-1);
+  font-size: 13px;
+}
+.menu-item.active {
+  background: var(--bg-2);
+  color: var(--text-0);
+  box-shadow: inset 2px 0 0 var(--copper);
+}
+.menu-item.disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.menu-item-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.menu-item-hint {
+  margin-left: auto;
+  color: var(--text-faint);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.menu-item-desc {
+  color: var(--text-2);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.menu-empty {
+  padding: 6px 10px;
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+/* Status-bar chips (active model + thinking level), styled like .stack-chip. */
+.sb-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 6px;
+  height: 18px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.sb-chip:hover,
+.sb-chip.open {
+  border-color: var(--border-strong);
+  background: var(--bg-2);
+  color: var(--text-1);
+}
+.sb-chip .sb-chip-key {
+  color: var(--text-faint);
+}
+.sb-chip .sb-chip-val {
   color: var(--text-1);
 }
 

@@ -1,7 +1,54 @@
 import { useShallow } from 'zustand/react/shallow'
-import { useStore, countActive, selectCurrentRunId } from '../store/store'
+import {
+  useStore,
+  countActive,
+  selectCurrentRunId,
+  selectThinkingLevel,
+  selectActiveModel
+} from '../store/store'
 import { StackChip } from './StackChip'
+import { THINKING_LABEL } from '../lib/thinking'
 import type { StatsPatch } from '@shared/types'
+
+/** The active/desired model; click opens the picker. Falls back to the backend's first model. */
+function ModelChip(): JSX.Element | null {
+  const model = useStore(selectActiveModel)
+  const fallback = useStore((s) => {
+    const hid = s.view === 'dashboard' ? null : s.view.harnessId
+    const h = hid ? s.backend[hid] : undefined
+    return h?.online ? h.models[0] : undefined
+  })
+  const open = useStore((s) => s.openCommandMenu)
+  const label = model?.label ?? fallback
+  if (!label) return null
+  return (
+    <button
+      type="button"
+      className="sb-chip"
+      title="Active model — click to switch (/model)"
+      onClick={() => open({ kind: 'model' })}
+    >
+      <span className="sb-chip-val">{label}</span>
+    </button>
+  )
+}
+
+/** Current thinking level; click cycles it (mirrors Shift+Tab in the composer). */
+function ThinkingChip(): JSX.Element {
+  const level = useStore(selectThinkingLevel)
+  const cycle = useStore((s) => s.cycleThinkingLevel)
+  return (
+    <button
+      type="button"
+      className="sb-chip"
+      title="Thinking level — click to cycle (Shift+Tab in the composer)"
+      onClick={() => void cycle()}
+    >
+      <span className="sb-chip-key">think</span>
+      <span className="sb-chip-val">{THINKING_LABEL[level]}</span>
+    </button>
+  )
+}
 
 function fmt(n: number): string {
   if (n >= 1000) return `${(n / 1000).toFixed(1)}k`
@@ -81,7 +128,8 @@ export function StatusBar(): JSX.Element {
           {liveCount}/{allHealth.length || 0} HARNESSES LIVE
         </span>
       )}
-      {health?.online && health.models[0] && <span className="muted">{health.models[0]}</span>}
+      {harnessId && <ModelChip />}
+      {harnessId && <ThinkingChip />}
       {/* The machine behind that backend, when the stack monitor is configured. */}
       <StackChip />
       {runningCount > 0 && (

@@ -64,6 +64,19 @@ const api: HephApi = {
   agentClose: (runId) => ipcRenderer.invoke(IPC.agentClose, runId),
   agentListRuns: () => ipcRenderer.invoke(IPC.agentListRuns),
 
+  agentSetModel: (input) => ipcRenderer.invoke(IPC.agentSetModel, input),
+  agentCycleModel: (input) => ipcRenderer.invoke(IPC.agentCycleModel, input),
+  agentGetAvailableModels: (runId) => ipcRenderer.invoke(IPC.agentGetAvailableModels, runId),
+  agentSetThinkingLevel: (input) => ipcRenderer.invoke(IPC.agentSetThinkingLevel, input),
+  agentCycleThinkingLevel: (input) => ipcRenderer.invoke(IPC.agentCycleThinkingLevel, input),
+  agentGetState: (runId) => ipcRenderer.invoke(IPC.agentGetState, runId),
+  agentGetCommands: (runId) => ipcRenderer.invoke(IPC.agentGetCommands, runId),
+  agentCompact: (input) => ipcRenderer.invoke(IPC.agentCompact, input),
+  agentSetSessionName: (input) => ipcRenderer.invoke(IPC.agentSetSessionName, input),
+  agentClone: (input) => ipcRenderer.invoke(IPC.agentClone, input),
+  agentGetForkMessages: (runId) => ipcRenderer.invoke(IPC.agentGetForkMessages, runId),
+  agentFork: (input) => ipcRenderer.invoke(IPC.agentFork, input),
+
   onSessionUpdated: (cb) => {
     const listener = (_e: unknown, payload: SessionUpdatePayload) => cb(payload)
     ipcRenderer.on(IPC.evtSessionUpdated, listener)

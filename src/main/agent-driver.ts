@@ -7,10 +7,14 @@ import type {
   BatchItem,
   ExtensionUIRequest,
   ExtensionUIResponse,
+  ForkPoint,
+  HarnessCommand,
   HarnessConfig,
+  ModelInfo,
   RunSnapshot,
   RunStatus,
   StatsPatch,
+  ThinkingLevel,
   ToolArgsLike,
   Usage
 } from '@shared/types'
@@ -117,6 +121,127 @@ export class AgentDriver {
   /** Answer an in-flight interactive prompt for a run (RPC extension_ui_response). */
   respond(runId: string, response: ExtensionUIResponse): void {
     this.runs.get(runId)?.respond(response)
+  }
+
+  // --- model + thinking-level + session commands (renderer-facing) -----------
+  // Each resolves through AgentSession.request()'s correlated response; the
+  // wrapped {ok, ...} shape mirrors send()/respond() for the IPC layer, and
+  // query-style commands degrade to []/null when the run can't answer.
+
+  async setModel(
+    runId: string,
+    provider: string,
+    modelId: string
+  ): Promise<{ ok: boolean; reason?: string; model?: ModelInfo }> {
+    const s = this.runs.get(runId)
+    if (!s) return { ok: false, reason: 'No open agent run.' }
+    try {
+      return { ok: true, model: await s.setModel(provider, modelId) }
+    } catch (err) {
+      return { ok: false, reason: errMsg(err) }
+    }
+  }
+
+  async cycleModel(runId: string): Promise<{ ok: boolean; reason?: string; model?: ModelInfo }> {
+    const s = this.runs.get(runId)
+    if (!s) return { ok: false, reason: 'No open agent run.' }
+    try {
+      return { ok: true, model: await s.cycleModel() }
+    } catch (err) {
+      return { ok: false, reason: errMsg(err) }
+    }
+  }
+
+  async getAvailableModels(runId: string): Promise<ModelInfo[]> {
+    try {
+      return (await this.runs.get(runId)?.getAvailableModels()) ?? []
+    } catch {
+      return []
+    }
+  }
+
+  async setThinkingLevel(
+    runId: string,
+    level: ThinkingLevel
+  ): Promise<{ ok: boolean; reason?: string }> {
+    return this.voidCommand(runId, (s) => s.setThinkingLevel(level))
+  }
+
+  async cycleThinkingLevel(
+    runId: string
+  ): Promise<{ ok: boolean; reason?: string; level?: ThinkingLevel }> {
+    const s = this.runs.get(runId)
+    if (!s) return { ok: false, reason: 'No open agent run.' }
+    try {
+      return { ok: true, level: await s.cycleThinkingLevel() }
+    } catch (err) {
+      return { ok: false, reason: errMsg(err) }
+    }
+  }
+
+  async getState(runId: string): Promise<{
+    thinkingLevel?: ThinkingLevel
+    model?: ModelInfo
+    isStreaming?: boolean
+    sessionFile?: string
+  } | null> {
+    const s = this.runs.get(runId)
+    if (!s) return null
+    try {
+      return await s.getState()
+    } catch {
+      return null
+    }
+  }
+
+  async getCommands(runId: string): Promise<HarnessCommand[]> {
+    try {
+      return (await this.runs.get(runId)?.getCommands()) ?? []
+    } catch {
+      return []
+    }
+  }
+
+  async compact(
+    runId: string,
+    customInstructions?: string
+  ): Promise<{ ok: boolean; reason?: string }> {
+    return this.voidCommand(runId, (s) => s.compact(customInstructions))
+  }
+
+  async setSessionName(runId: string, name: string): Promise<{ ok: boolean; reason?: string }> {
+    return this.voidCommand(runId, (s) => s.setSessionName(name))
+  }
+
+  async clone(runId: string): Promise<{ ok: boolean; reason?: string }> {
+    return this.voidCommand(runId, (s) => s.clone())
+  }
+
+  async getForkMessages(runId: string): Promise<ForkPoint[]> {
+    try {
+      return (await this.runs.get(runId)?.getForkMessages()) ?? []
+    } catch {
+      return []
+    }
+  }
+
+  async fork(runId: string, entryId: string): Promise<{ ok: boolean; reason?: string }> {
+    return this.voidCommand(runId, (s) => s.fork(entryId))
+  }
+
+  /** Shared wrapper for commands that only report ok/reason. */
+  private async voidCommand(
+    runId: string,
+    fn: (s: AgentSession) => Promise<void>
+  ): Promise<{ ok: boolean; reason?: string }> {
+    const s = this.runs.get(runId)
+    if (!s) return { ok: false, reason: 'No open agent run.' }
+    try {
+      await fn(s)
+      return { ok: true }
+    } catch (err) {
+      return { ok: false, reason: errMsg(err) }
+    }
   }
 
   abort(runId: string): void {
@@ -237,7 +362,9 @@ const URGENT: ReadonlySet<string> = new Set([
   'compaction_start',
   'compaction_end',
   'auto_retry_start',
-  'auto_retry_end'
+  'auto_retry_end',
+  'thinking_level_changed',
+  'state_sync'
 ])
 
 class AgentSession {
@@ -262,6 +389,9 @@ class AgentSession {
   private retry: RunSnapshot['retry']
   /** A blocking interactive prompt the turn is paused on, awaiting our response. */
   private pendingUi: ExtensionUIRequest | null = null
+  /** Last thinking level / model seen via `get_state`, so `state_sync` fires only on change. */
+  private lastThinkingLevel: ThinkingLevel | undefined
+  private lastModelKey: string | undefined
 
   // --- request/response correlation -----------------------------------------
   private reqSeq = 0
@@ -435,6 +565,123 @@ class AgentSession {
     this.pendingUi = null
     this.clearUiTimer()
     this.write({ type: 'extension_ui_response', id, ...response })
+  }
+
+  // -------------------------------------------------------------------------
+  // Model + thinking-level + session commands (correlated RPC)
+  // -------------------------------------------------------------------------
+
+  async setModel(provider: string, modelId: string): Promise<ModelInfo | undefined> {
+    const model = mapModel(await this.request({ type: 'set_model', provider, modelId }))
+    if (model) this.lastModelKey = modelKey(model)
+    return model
+  }
+
+  async cycleModel(): Promise<ModelInfo | undefined> {
+    const data = await this.request({ type: 'cycle_model' })
+    // cycle_model wraps the model as { model, thinkingLevel, isScoped }; set_model returns it bare.
+    const model = mapModel(asRecord(data)?.model ?? data)
+    if (model) this.lastModelKey = modelKey(model)
+    return model
+  }
+
+  async getAvailableModels(): Promise<ModelInfo[]> {
+    const models = asRecord(await this.request({ type: 'get_available_models' }))?.models
+    return Array.isArray(models)
+      ? models.map(mapModel).filter((m): m is ModelInfo => m !== undefined)
+      : []
+  }
+
+  async setThinkingLevel(level: ThinkingLevel): Promise<void> {
+    await this.request({ type: 'set_thinking_level', level })
+    this.lastThinkingLevel = level
+  }
+
+  async cycleThinkingLevel(): Promise<ThinkingLevel | undefined> {
+    const level = str(asRecord(await this.request({ type: 'cycle_thinking_level' }))?.level) as
+      | ThinkingLevel
+      | undefined
+    if (level) this.lastThinkingLevel = level
+    return level
+  }
+
+  async getState(): Promise<{
+    thinkingLevel?: ThinkingLevel
+    model?: ModelInfo
+    isStreaming?: boolean
+    sessionFile?: string
+  }> {
+    const d = asRecord(await this.request({ type: 'get_state' })) ?? {}
+    return {
+      thinkingLevel: str(d.thinkingLevel) as ThinkingLevel | undefined,
+      model: mapModel(d.model),
+      isStreaming: d.isStreaming === true,
+      sessionFile: str(d.sessionFile)
+    }
+  }
+
+  async getCommands(): Promise<HarnessCommand[]> {
+    const cmds = asRecord(await this.request({ type: 'get_commands' }))?.commands
+    if (!Array.isArray(cmds)) return []
+    return cmds
+      .map((c): HarnessCommand | undefined => {
+        const r = asRecord(c)
+        const name = str(r?.name)
+        return name
+          ? { name, description: str(r?.description), source: str(r?.source) ?? 'extension' }
+          : undefined
+      })
+      .filter((c): c is HarnessCommand => c !== undefined)
+  }
+
+  async compact(customInstructions?: string): Promise<void> {
+    await this.request(
+      { type: 'compact', ...(customInstructions ? { customInstructions } : {}) },
+      120_000
+    )
+  }
+
+  async setSessionName(name: string): Promise<void> {
+    await this.request({ type: 'set_session_name', name })
+  }
+
+  async clone(): Promise<void> {
+    await this.request({ type: 'clone' })
+    this.rebindSoon()
+  }
+
+  async getForkMessages(): Promise<ForkPoint[]> {
+    const msgs = asRecord(await this.request({ type: 'get_fork_messages' }))?.messages
+    if (!Array.isArray(msgs)) return []
+    return msgs
+      .map((m): ForkPoint | undefined => {
+        const r = asRecord(m)
+        const entryId = str(r?.entryId)
+        return entryId ? { entryId, text: str(r?.text) ?? '' } : undefined
+      })
+      .filter((m): m is ForkPoint => m !== undefined)
+  }
+
+  async fork(entryId: string): Promise<void> {
+    await this.request({ type: 'fork', entryId })
+    this.rebindSoon()
+  }
+
+  /**
+   * After a clone/fork the harness has switched to a new session file. Re-read
+   * state and adopt the new path so the renderer follows the branch.
+   */
+  private rebindSoon(): void {
+    void this.request({ type: 'get_state' }, PING_TIMEOUT_MS)
+      .then((data) => {
+        const sf = str(asRecord(data)?.sessionFile)
+        if (sf && existsSync(sf) && !samePath(sf, this.sessionPath ?? '')) {
+          this.sessionPath = sf
+          this.queueEvent({ type: 'session_bound', sessionPath: sf })
+        }
+        this.absorbState(data)
+      })
+      .catch(() => undefined)
   }
 
   /** Give up on a pending auto-retry rather than waiting out its backoff. */
@@ -679,6 +926,13 @@ class AgentSession {
       case 'session_info_changed':
         this.queueEvent({ type: 'session_info_changed', name: str(evt.name) })
         return
+
+      case 'thinking_level_changed': {
+        const level = (str(evt.level) ?? 'medium') as ThinkingLevel
+        this.lastThinkingLevel = level
+        this.queueEvent({ type: 'thinking_level_changed', level })
+        return
+      }
 
       case 'extension_ui_request': {
         const ui = parseUiRequest(evt)
@@ -1014,7 +1268,7 @@ class AgentSession {
         return
       }
       void this.request({ type: 'get_state' }, PING_TIMEOUT_MS)
-        .then((data) => this.bindSessionFile(data))
+        .then((data) => this.absorbState(data))
         .catch(() => undefined)
         .then(() => {
           if (this.sessionPath || this.finished) {
@@ -1036,6 +1290,30 @@ class AgentSession {
   }
 
   /**
+   * Bind the session file (as `bindSessionFile`) and additionally surface the
+   * authoritative thinking level + model carried by every `get_state` response as
+   * a `state_sync` event — but only when either changed, so the routine liveness
+   * and session-file polls stay quiet on an unchanged session.
+   */
+  private absorbState(data: unknown): void {
+    this.bindSessionFile(data)
+    const d = asRecord(data)
+    if (!d) return
+    const patch: { thinkingLevel?: ThinkingLevel; model?: ModelInfo } = {}
+    const level = str(d.thinkingLevel) as ThinkingLevel | undefined
+    if (level && level !== this.lastThinkingLevel) {
+      this.lastThinkingLevel = level
+      patch.thinkingLevel = level
+    }
+    const model = mapModel(d.model)
+    if (model && modelKey(model) !== this.lastModelKey) {
+      this.lastModelKey = modelKey(model)
+      patch.model = model
+    }
+    if (patch.thinkingLevel || patch.model) this.queueEvent({ type: 'state_sync', ...patch })
+  }
+
+  /**
    * A wedged harness looks exactly like a long silent tool call, so silence
    * alone proves nothing. `get_state` answers even mid-stream — an unanswered
    * one is real evidence.
@@ -1049,7 +1327,7 @@ class AgentSession {
           this.unresponsive = false
           this.queueEvent({ type: 'responsive' })
         }
-        this.bindSessionFile(data)
+        this.absorbState(data)
       })
       .catch(() => {
         if (this.finished || this.unresponsive) return
@@ -1362,6 +1640,42 @@ function parseUiStatus(evt: Record<string, unknown>): AgentStreamEvent | undefin
       // `set_editor_text` and anything else display-only: nothing to show.
       return undefined
   }
+}
+
+/** pi thinking levels in canonical order, used to read a model's `thinkingLevelMap`. */
+const ALL_THINKING_LEVELS: ThinkingLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh']
+
+function modelKey(m: ModelInfo): string {
+  return `${m.provider}/${m.modelId}`
+}
+
+function errMsg(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
+/** Map a pi `Model` (from set_model / get_state / get_available_models) to our `ModelInfo`. */
+function mapModel(v: unknown): ModelInfo | undefined {
+  const m = asRecord(v)
+  if (!m) return undefined
+  const provider = str(m.provider)
+  const modelId = str(m.id) ?? str(m.modelId)
+  if (!provider || !modelId) return undefined
+  return {
+    provider,
+    modelId,
+    label: str(m.name) ?? modelId,
+    reasoning: m.reasoning === true ? true : undefined,
+    contextWindow: num(m.contextWindow),
+    thinkingLevels: thinkingLevelsFromMap(m.thinkingLevelMap)
+  }
+}
+
+/** Supported levels = keys of `thinkingLevelMap` whose value isn't null. */
+function thinkingLevelsFromMap(v: unknown): ThinkingLevel[] | undefined {
+  const m = asRecord(v)
+  if (!m) return undefined
+  const levels = ALL_THINKING_LEVELS.filter((lvl) => lvl in m && m[lvl] !== null)
+  return levels.length ? levels : undefined
 }
 
 /** Normalized, trailing-slash-tolerant path equality. */

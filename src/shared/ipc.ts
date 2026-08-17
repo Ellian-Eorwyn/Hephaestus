@@ -37,6 +37,19 @@ export const IPC = {
   agentClose: 'agent:close',
   agentListRuns: 'agent:listRuns',
 
+  agentSetModel: 'agent:setModel',
+  agentCycleModel: 'agent:cycleModel',
+  agentGetAvailableModels: 'agent:getAvailableModels',
+  agentSetThinkingLevel: 'agent:setThinkingLevel',
+  agentCycleThinkingLevel: 'agent:cycleThinkingLevel',
+  agentGetState: 'agent:getState',
+  agentGetCommands: 'agent:getCommands',
+  agentCompact: 'agent:compact',
+  agentSetSessionName: 'agent:setSessionName',
+  agentClone: 'agent:clone',
+  agentGetForkMessages: 'agent:getForkMessages',
+  agentFork: 'agent:fork',
+
   // main -> renderer events
   evtSessionUpdated: 'evt:sessionUpdated',
   evtAgentBatch: 'evt:agentBatch',

@@ -445,6 +445,40 @@ export type ExtensionUIResponse =
   | { cancelled: true }
 
 /**
+ * Reasoning-effort level the harness applies to a session (pi's `ThinkingLevel`).
+ * Sticky per session: set once and every subsequent prompt uses it. `xhigh` is
+ * only offered by some model families; the harness clamps to what a model supports.
+ */
+export type ThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
+
+/**
+ * A model the harness can switch to. `provider` + `modelId` is the identity pi's
+ * `set_model` expects; `label` is for display. `thinkingLevels`, when known, is
+ * the subset of levels this model supports (derived from its `thinkingLevelMap`).
+ */
+export interface ModelInfo {
+  provider: string
+  modelId: string
+  label: string
+  reasoning?: boolean
+  contextWindow?: number
+  thinkingLevels?: ThinkingLevel[]
+}
+
+/** One command the harness exposes over `get_commands` (invoked by sending its name as a prompt). */
+export interface HarnessCommand {
+  name: string
+  description?: string
+  source: 'extension' | 'prompt' | 'skill' | string
+}
+
+/** A branch point for `/fork`: a prior entry the session can be forked from. */
+export interface ForkPoint {
+  entryId: string
+  text: string
+}
+
+/**
  * Loosely-typed tool arguments. The harness passes tool input through verbatim,
  * so we name only the fields we act on (`path` for edit/write, `command` for
  * bash) and keep the rest opaque.
@@ -524,6 +558,12 @@ export type AgentStreamEvent =
     }
   | { type: 'auto_retry_end'; success: boolean; finalError?: string }
   | { type: 'session_info_changed'; name?: string }
+  // Live model / thinking-level state. `thinking_level_changed` is a real harness
+  // event (emitted when the level changes); `state_sync` is synthesized by the
+  // driver from `get_state` so the renderer learns the authoritative model + level
+  // without any extra polling.
+  | { type: 'thinking_level_changed'; level: ThinkingLevel }
+  | { type: 'state_sync'; thinkingLevel?: ThinkingLevel; model?: ModelInfo }
   // Interactive prompts (blocking) and display-only status from extensions.
   | { type: 'extension_ui_request'; ui: ExtensionUIRequest }
   | { type: 'ui_cancelled'; id: string }
@@ -725,6 +765,51 @@ export interface HephApi {
   agentClose(runId: string): Promise<void>
   /** Snapshot every live run so the renderer can resync after a reload/disconnect. */
   agentListRuns(): Promise<RunSnapshot[]>
+
+  // --- Model + thinking-level control (RPC set_model / set_thinking_level / …) ---
+  /** Switch the active model. Returns the harness's authoritative `ModelInfo`. */
+  agentSetModel(input: {
+    runId: string
+    provider: string
+    modelId: string
+  }): Promise<{ ok: boolean; reason?: string; model?: ModelInfo }>
+  /** Advance to the next available model (pi `cycle_model`). */
+  agentCycleModel(input: {
+    runId: string
+  }): Promise<{ ok: boolean; reason?: string; model?: ModelInfo }>
+  /** Live list of switchable models for a run (empty when the run can't answer). */
+  agentGetAvailableModels(runId: string): Promise<ModelInfo[]>
+  /** Set the sticky thinking level for the session. */
+  agentSetThinkingLevel(input: {
+    runId: string
+    level: ThinkingLevel
+  }): Promise<{ ok: boolean; reason?: string }>
+  /** Advance to the next thinking level the model supports; returns the new level. */
+  agentCycleThinkingLevel(input: {
+    runId: string
+  }): Promise<{ ok: boolean; reason?: string; level?: ThinkingLevel }>
+  /** Read authoritative session state (model, thinking level, streaming). */
+  agentGetState(runId: string): Promise<{
+    thinkingLevel?: ThinkingLevel
+    model?: ModelInfo
+    isStreaming?: boolean
+    sessionFile?: string
+  } | null>
+  /** Harness-provided commands (extension/prompt/skill) for slash autocomplete. */
+  agentGetCommands(runId: string): Promise<HarnessCommand[]>
+
+  // --- Session commands (broad slash-command coverage) ---
+  agentCompact(input: {
+    runId: string
+    customInstructions?: string
+  }): Promise<{ ok: boolean; reason?: string }>
+  agentSetSessionName(input: {
+    runId: string
+    name: string
+  }): Promise<{ ok: boolean; reason?: string }>
+  agentClone(input: { runId: string }): Promise<{ ok: boolean; reason?: string }>
+  agentGetForkMessages(runId: string): Promise<ForkPoint[]>
+  agentFork(input: { runId: string; entryId: string }): Promise<{ ok: boolean; reason?: string }>
 
   // Subscriptions (return an unsubscribe fn)
   onSessionUpdated(cb: (payload: SessionUpdatePayload) => void): () => void
